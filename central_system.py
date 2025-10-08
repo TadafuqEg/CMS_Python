@@ -29,6 +29,7 @@ logging.basicConfig(level=logging.DEBUG)  # Set to DEBUG for detailed logging
 class CentralSystem(cp):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.transaction_counter = 0  # Initialize transaction counter
         logging.debug("CentralSystem initialized with route_map: %s", self.route_map)
 
     @on(Action.authorize)
@@ -262,9 +263,10 @@ class CentralSystem(cp):
     @on(Action.start_transaction)
     async def on_start_transaction(self, connector_id, id_tag, meter_start, timestamp, **kwargs):
         try:
-            logging.info(f"Received StartTransaction: connector_id {connector_id}, id_tag {id_tag}")
+            self.transaction_counter += 1  # Increment transaction counter
+            logging.info(f"Received StartTransaction: connector_id {connector_id}, id_tag {id_tag}, transaction_id {self.transaction_counter}")
             return call_result.StartTransaction(
-                transaction_id=1,
+                transaction_id=self.transaction_counter,
                 id_tag_info={'status': AuthorizationStatus.accepted}
             )
         except Exception as e:
