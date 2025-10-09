@@ -3,6 +3,7 @@ import logging
 from datetime import datetime
 import ssl
 import websockets
+from typing import Dict, Set
 from ocpp.routing import on
 from ocpp.v16 import ChargePoint as cp
 from ocpp.v16 import call_result
@@ -26,10 +27,100 @@ from ocpp.v16.enums import (
 
 logging.basicConfig(level=logging.DEBUG)  # Set to DEBUG for detailed logging
 
+# Global client manager to track all connected clients
+class ClientManager:
+    def __init__(self):
+        self.clients: Dict[str, 'CentralSystem'] = {}
+        self.master_connections: Set[websockets.WebSocketServerProtocol] = set()
+        
+    def add_client(self, client_id: str, central_system: 'CentralSystem'):
+        """Add a new client to the manager"""
+        self.clients[client_id] = central_system
+        logging.info(f"Client {client_id} added. Total clients: {len(self.clients)}")
+        
+    def remove_client(self, client_id: str):
+        """Remove a client from the manager"""
+        if client_id in self.clients:
+            del self.clients[client_id]
+            logging.info(f"Client {client_id} removed. Total clients: {len(self.clients)}")
+            
+    def add_master_connection(self, websocket: websockets.WebSocketServerProtocol):
+        """Add a master connection for broadcasting"""
+        self.master_connections.add(websocket)
+        logging.info(f"Master connection added. Total master connections: {len(self.master_connections)}")
+        
+    def remove_master_connection(self, websocket: websockets.WebSocketServerProtocol):
+        """Remove a master connection"""
+        self.master_connections.discard(websocket)
+        logging.info(f"Master connection removed. Total master connections: {len(self.master_connections)}")
+        
+    async def broadcast_to_all_clients(self, message: str):
+        """Broadcast a message to all connected clients"""
+        if not self.clients:
+            logging.warning("No clients connected to broadcast to")
+            return
+            
+        tasks = []
+        disconnected_clients = []
+        
+        for client_id, central_system in self.clients.items():
+            try:
+                if hasattr(central_system, 'websocket') and not central_system.websocket.closed:
+                    tasks.append(central_system.websocket.send(message))
+                else:
+                    disconnected_clients.append(client_id)
+            except Exception as e:
+                logging.error(f"Error preparing broadcast for client {client_id}: {e}")
+                disconnected_clients.append(client_id)
+                
+        # Remove disconnected clients
+        for client_id in disconnected_clients:
+            self.remove_client(client_id)
+            
+        if tasks:
+            try:
+                await asyncio.gather(*tasks, return_exceptions=True)
+                logging.info(f"Broadcasted message to {len(tasks)} clients")
+            except Exception as e:
+                logging.error(f"Error broadcasting message: {e}")
+                
+    async def handle_master_connection(self, websocket: websockets.WebSocketServerProtocol, path: str):
+        """Handle master connections for broadcasting"""
+        self.add_master_connection(websocket)
+        
+        try:
+            async for message in websocket:
+                logging.info(f"Master connection received message: {message}")
+                # Broadcast the message to all clients
+                await self.broadcast_to_all_clients(message)
+                
+        except websockets.exceptions.ConnectionClosed:
+            logging.info("Master connection closed")
+        except Exception as e:
+            logging.error(f"Error handling master connection: {e}")
+        finally:
+            self.remove_master_connection(websocket)
+
+# Global client manager instance
+client_manager = ClientManager()
+
 class CentralSystem(cp):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, charge_point_id: str, websocket: websockets.WebSocketServerProtocol, *args, **kwargs):
+        super().__init__(charge_point_id, websocket, *args, **kwargs)
+        self.charge_point_id = charge_point_id
+        self.websocket = websocket
         logging.debug("CentralSystem initialized with route_map: %s", self.route_map)
+        
+        # Register this client with the global manager
+        client_manager.add_client(charge_point_id, self)
+        
+    async def start(self):
+        """Override start method to handle cleanup"""
+        try:
+            await super().start()
+        finally:
+            # Remove client from manager when connection closes
+            client_manager.remove_client(self.charge_point_id)
 
     @on(Action.authorize)
     async def on_authorize(self, id_tag, **kwargs):
@@ -322,20 +413,35 @@ class CentralSystem(cp):
             logging.error(f"Error in on_update_firmware: {e}")
             raise
 
+async def handle_client_connection(websocket, path):
+    """Handle regular client connections"""
+    charge_point_id = path.split('/')[-1]
+    logging.info(f"Client connecting: {charge_point_id}")
+    
+    central_system = CentralSystem(charge_point_id, websocket)
+    await central_system.start()
+
 async def main():
     try:
         # Create an SSL context for WSS
         ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ssl_context.load_cert_chain(certfile="cert.pem", keyfile="key.pem")  # Update paths if needed
 
+        # Start server with both client and master connection handlers
         async with websockets.serve(
-            lambda ws, path: CentralSystem(path.split('/')[-1], ws).start(),
+            lambda ws, path: (
+                client_manager.handle_master_connection(ws, path) 
+                if path.startswith('/master') 
+                else handle_client_connection(ws, path)
+            ),
             "localhost",
             9000,
             subprotocols=["ocpp1.6"],
             ssl=ssl_context  # Add SSL context for WSS
         ):
             logging.info("OCPP 1.6 server running on wss://localhost:9000")
+            logging.info("Regular clients connect to: wss://localhost:9000/{charge_point_id}")
+            logging.info("Master connections connect to: wss://localhost:9000/master")
             await asyncio.Future()  # Run forever
     except Exception as e:
         logging.error(f"Server failed: {e}")
