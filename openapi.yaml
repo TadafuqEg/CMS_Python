@@ -1,0 +1,1333 @@
+openapi: 3.0.3
+info:
+  title: OCPP Central Management System API
+  description: |
+    FastAPI-based OCPP 1.6/2.0.1 Central System with REST APIs for charger management,
+    session tracking, and real-time monitoring.
+    
+    ## Features
+    - OCPP WebSocket server for charger connections
+    - REST APIs for charger management and control
+    - Real-time session tracking and status updates
+    - Message logging and audit trail
+    - Laravel CMS integration via message queue
+    - JWT authentication and role-based access control
+    
+    ## WebSocket Endpoints
+    - `/ocpp/{charger_id}` - OCPP charger connections
+    - `/master` - Master connections for broadcasting
+    - `/dashboard` - Real-time dashboard updates
+    
+    ## Authentication
+    All REST API endpoints require JWT Bearer token authentication.
+    WebSocket endpoints for dashboard also require authentication.
+  version: 1.0.0
+  contact:
+    name: OCPP CMS Support
+    email: support@ocpp-cms.com
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: https://api.ocpp-cms.com
+    description: Production server
+  - url: https://staging-api.ocpp-cms.com
+    description: Staging server
+  - url: http://localhost:8000
+    description: Development server
+
+security:
+  - BearerAuth: []
+
+paths:
+  /:
+    get:
+      tags:
+        - Root
+      summary: API Information
+      description: Get basic API information and available endpoints
+      security: []
+      responses:
+        '200':
+          description: API information
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "OCPP Central Management System API"
+                  version:
+                    type: string
+                    example: "1.0.0"
+                  docs:
+                    type: string
+                    example: "/docs"
+                  websocket_endpoints:
+                    type: object
+                    properties:
+                      chargers:
+                        type: string
+                        example: "/ocpp/{charger_id}"
+                      master:
+                        type: string
+                        example: "/master"
+                      dashboard:
+                        type: string
+                        example: "/dashboard"
+
+  /api/health:
+    get:
+      tags:
+        - Health
+      summary: System Health Check
+      description: Check system health and return status information
+      security: []
+      responses:
+        '200':
+          description: System health status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+
+  /api/metrics:
+    get:
+      tags:
+        - Health
+      summary: System Metrics
+      description: Get Prometheus-compatible metrics for monitoring
+      security: []
+      responses:
+        '200':
+          description: System metrics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Metrics'
+
+  /api/status:
+    get:
+      tags:
+        - Health
+      summary: Detailed System Status
+      description: Get detailed system status including recent activity
+      security: []
+      responses:
+        '200':
+          description: Detailed system status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DetailedStatus'
+
+  /api/chargers:
+    get:
+      tags:
+        - Chargers
+      summary: List Chargers
+      description: Get list of chargers with optional filtering
+      parameters:
+        - name: skip
+          in: query
+          description: Number of records to skip
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: limit
+          in: query
+          description: Number of records to return
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+        - name: status
+          in: query
+          description: Filter by charger status
+          schema:
+            type: string
+            enum: [Available, Charging, Faulted, Offline, Unknown]
+        - name: site_id
+          in: query
+          description: Filter by site ID
+          schema:
+            type: string
+        - name: organization_id
+          in: query
+          description: Filter by organization ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of chargers
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ChargerResponse'
+
+  /api/chargers/{charger_id}:
+    get:
+      tags:
+        - Chargers
+      summary: Get Charger Details
+      description: Get detailed information about a specific charger
+      parameters:
+        - name: charger_id
+          in: path
+          required: true
+          description: Charger ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Charger details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChargerDetailResponse'
+        '404':
+          description: Charger not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    put:
+      tags:
+        - Chargers
+      summary: Update Charger
+      description: Update charger information
+      parameters:
+        - name: charger_id
+          in: path
+          required: true
+          description: Charger ID
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChargerUpdateRequest'
+      responses:
+        '200':
+          description: Charger updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessMessage'
+        '404':
+          description: Charger not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    delete:
+      tags:
+        - Chargers
+      summary: Delete Charger
+      description: Force disconnect a charger
+      parameters:
+        - name: charger_id
+          in: path
+          required: true
+          description: Charger ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Charger disconnected successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessMessage'
+        '404':
+          description: Charger not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/chargers/{charger_id}/sessions:
+    get:
+      tags:
+        - Chargers
+      summary: Get Charger Sessions
+      description: Get sessions for a specific charger
+      parameters:
+        - name: charger_id
+          in: path
+          required: true
+          description: Charger ID
+          schema:
+            type: string
+        - name: skip
+          in: query
+          description: Number of records to skip
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: limit
+          in: query
+          description: Number of records to return
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: status
+          in: query
+          description: Filter by session status
+          schema:
+            type: string
+            enum: [Active, Completed, Stopped, Faulted]
+      responses:
+        '200':
+          description: List of sessions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SessionResponse'
+        '404':
+          description: Charger not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/chargers/{charger_id}/statistics:
+    get:
+      tags:
+        - Chargers
+      summary: Get Charger Statistics
+      description: Get statistics for a specific charger
+      parameters:
+        - name: charger_id
+          in: path
+          required: true
+          description: Charger ID
+          schema:
+            type: string
+        - name: days
+          in: query
+          description: Number of days for statistics
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 365
+            default: 7
+      responses:
+        '200':
+          description: Charger statistics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChargerStatistics'
+        '404':
+          description: Charger not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/ocpp/remote/start:
+    post:
+      tags:
+        - OCPP Control
+      summary: Remote Start Transaction
+      description: Start a charging session remotely
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RemoteStartRequest'
+      responses:
+        '200':
+          description: Remote start command sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OCPPResponse'
+        '400':
+          description: Invalid request or charger not connected
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Charger not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/ocpp/remote/stop:
+    post:
+      tags:
+        - OCPP Control
+      summary: Remote Stop Transaction
+      description: Stop a running charging session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RemoteStopRequest'
+      responses:
+        '200':
+          description: Remote stop command sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OCPPResponse'
+        '400':
+          description: Invalid request or charger not connected
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Charger or session not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/ocpp/unlock:
+    post:
+      tags:
+        - OCPP Control
+      summary: Unlock Connector
+      description: Unlock a connector manually
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UnlockConnectorRequest'
+      responses:
+        '200':
+          description: Unlock command sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OCPPResponse'
+        '400':
+          description: Invalid request or charger not connected
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Charger not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/ocpp/reboot:
+    post:
+      tags:
+        - OCPP Control
+      summary: Reboot Charger
+      description: Send reboot command to a charger
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RebootRequest'
+      responses:
+        '200':
+          description: Reboot command sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OCPPResponse'
+        '400':
+          description: Invalid request or charger not connected
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Charger not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/ocpp/configuration/get:
+    post:
+      tags:
+        - OCPP Control
+      summary: Get Configuration
+      description: Retrieve charger configuration parameters
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GetConfigurationRequest'
+      responses:
+        '200':
+          description: Configuration retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OCPPResponse'
+        '400':
+          description: Invalid request or charger not connected
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Charger not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/ocpp/configuration/set:
+    post:
+      tags:
+        - OCPP Control
+      summary: Set Configuration
+      description: Update configuration parameters on a charger
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetConfigurationRequest'
+      responses:
+        '200':
+          description: Configuration update command sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OCPPResponse'
+        '400':
+          description: Invalid request or charger not connected
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Charger not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/logs:
+    get:
+      tags:
+        - Logs
+      summary: Get System Logs
+      description: Retrieve recent system logs for debugging or monitoring
+      parameters:
+        - name: skip
+          in: query
+          description: Number of records to skip
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: limit
+          in: query
+          description: Number of records to return
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 50
+        - name: charger_id
+          in: query
+          description: Filter by charger ID
+          schema:
+            type: string
+        - name: action
+          in: query
+          description: Filter by OCPP action
+          schema:
+            type: string
+        - name: message_type
+          in: query
+          description: Filter by message type (IN or OUT)
+          schema:
+            type: string
+            enum: [IN, OUT]
+        - name: status
+          in: query
+          description: Filter by status
+          schema:
+            type: string
+            enum: [Success, Error, Timeout]
+        - name: start_time
+          in: query
+          description: Start time filter (ISO format)
+          schema:
+            type: string
+            format: date-time
+        - name: end_time
+          in: query
+          description: End time filter (ISO format)
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: List of log entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/LogEntry'
+
+  /api/logs/summary:
+    get:
+      tags:
+        - Logs
+      summary: Get Logs Summary
+      description: Get summary statistics of logs
+      parameters:
+        - name: hours
+          in: query
+          description: Number of hours for summary
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 168
+            default: 24
+        - name: charger_id
+          in: query
+          description: Filter by charger ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Logs summary statistics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LogsSummary'
+
+  /api/logs/export:
+    get:
+      tags:
+        - Logs
+      summary: Export Logs
+      description: Export logs in JSON or CSV format
+      parameters:
+        - name: format
+          in: query
+          description: Export format
+          schema:
+            type: string
+            enum: [json, csv]
+            default: json
+        - name: charger_id
+          in: query
+          description: Filter by charger ID
+          schema:
+            type: string
+        - name: start_time
+          in: query
+          description: Start time filter (ISO format)
+          schema:
+            type: string
+            format: date-time
+        - name: end_time
+          in: query
+          description: End time filter (ISO format)
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          description: Maximum number of records to export
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100000
+            default: 10000
+      responses:
+        '200':
+          description: Exported logs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExportResponse'
+            text/csv:
+              schema:
+                type: string
+
+  /api/diagnostics/upload:
+    post:
+      tags:
+        - Logs
+      summary: Request Diagnostics Upload
+      description: Request a charger to upload diagnostic logs
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DiagnosticsRequest'
+      responses:
+        '200':
+          description: Diagnostics upload request sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessMessage'
+        '400':
+          description: Invalid request or charger not connected
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Charger not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/internal/event:
+    post:
+      tags:
+        - Internal
+      summary: Receive Internal Event
+      description: Receive events or commands from Laravel CMS
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InternalEventRequest'
+      responses:
+        '200':
+          description: Event received and queued for processing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalEventResponse'
+
+  /api/internal/broadcast:
+    post:
+      tags:
+        - Internal
+      summary: Broadcast Message
+      description: Broadcast message to chargers
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BroadcastMessageRequest'
+      responses:
+        '200':
+          description: Message queued for broadcast
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BroadcastResponse'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+          example: "ok"
+        timestamp:
+          type: string
+          format: date-time
+        connected_chargers:
+          type: integer
+          example: 124
+        total_chargers:
+          type: integer
+          example: 150
+        active_sessions:
+          type: integer
+          example: 45
+        recent_messages:
+          type: integer
+          example: 1250
+        uptime:
+          type: string
+          example: "3h 42m"
+        version:
+          type: string
+          example: "1.0.0"
+
+    Metrics:
+      type: object
+      properties:
+        ocpp_active_connections:
+          type: integer
+          example: 124
+        ocpp_total_chargers:
+          type: integer
+          example: 150
+        ocpp_active_sessions:
+          type: integer
+          example: 45
+        ocpp_sessions_today:
+          type: integer
+          example: 234
+        ocpp_messages_24h:
+          type: integer
+          example: 12500
+        ocpp_energy_delivered_24h_kwh:
+          type: number
+          format: float
+          example: 1250.5
+        ocpp_error_messages_24h:
+          type: integer
+          example: 12
+        ocpp_uptime_seconds:
+          type: integer
+          example: 86400
+
+    DetailedStatus:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        charger_status_breakdown:
+          type: object
+          additionalProperties:
+            type: integer
+        recent_activity:
+          type: array
+          items:
+            $ref: '#/components/schemas/ActivityEntry'
+        system_configuration:
+          type: object
+          additionalProperties:
+            type: string
+        database_status:
+          type: string
+          example: "connected"
+        message_queue_status:
+          type: string
+          example: "connected"
+
+    ActivityEntry:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        charger_id:
+          type: string
+        action:
+          type: string
+        type:
+          type: string
+          enum: [IN, OUT]
+        status:
+          type: string
+
+    ChargerResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          example: "CP_001"
+        vendor:
+          type: string
+          example: "Commercial MINI DC"
+        model:
+          type: string
+          example: "CMDC-60kW"
+        serial_number:
+          type: string
+          example: "CMDC001234567"
+        firmware_version:
+          type: string
+          example: "1.0.0"
+        status:
+          type: string
+          enum: [Available, Charging, Faulted, Offline, Unknown]
+          example: "Available"
+        last_heartbeat:
+          type: string
+          format: date-time
+        last_message:
+          type: string
+          example: "Heartbeat"
+        is_connected:
+          type: boolean
+          example: true
+        connection_time:
+          type: string
+          format: date-time
+        site_id:
+          type: string
+          example: "SITE_001"
+        organization_id:
+          type: string
+          example: "ORG_001"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    ChargerDetailResponse:
+      allOf:
+        - $ref: '#/components/schemas/ChargerResponse'
+        - type: object
+          properties:
+            configuration:
+              type: object
+              additionalProperties: true
+            connectors:
+              type: array
+              items:
+                $ref: '#/components/schemas/ConnectorInfo'
+            active_sessions:
+              type: integer
+              example: 2
+            total_sessions:
+              type: integer
+              example: 156
+            energy_delivered_today:
+              type: number
+              format: float
+              example: 125.5
+
+    ConnectorInfo:
+      type: object
+      properties:
+        id:
+          type: integer
+        connector_id:
+          type: integer
+        status:
+          type: string
+          enum: [Available, Occupied, Faulted, Unavailable]
+        error_code:
+          type: string
+        energy_delivered:
+          type: number
+          format: float
+        power_delivered:
+          type: number
+          format: float
+
+    ChargerUpdateRequest:
+      type: object
+      properties:
+        site_id:
+          type: string
+        organization_id:
+          type: string
+        configuration:
+          type: object
+          additionalProperties: true
+
+    SessionResponse:
+      type: object
+      properties:
+        id:
+          type: integer
+        transaction_id:
+          type: integer
+        connector_id:
+          type: integer
+        id_tag:
+          type: string
+        user_id:
+          type: string
+        start_time:
+          type: string
+          format: date-time
+        stop_time:
+          type: string
+          format: date-time
+        duration:
+          type: integer
+        energy_delivered:
+          type: number
+          format: float
+        cost:
+          type: number
+          format: float
+        status:
+          type: string
+          enum: [Active, Completed, Stopped, Faulted]
+        meter_start:
+          type: number
+          format: float
+        meter_stop:
+          type: number
+          format: float
+
+    ChargerStatistics:
+      type: object
+      properties:
+        charger_id:
+          type: string
+        period_days:
+          type: integer
+        total_sessions:
+          type: integer
+        completed_sessions:
+          type: integer
+        total_energy_kwh:
+          type: number
+          format: float
+        total_cost:
+          type: number
+          format: float
+        total_duration_seconds:
+          type: integer
+        average_session_duration:
+          type: number
+          format: float
+        average_energy_per_session:
+          type: number
+          format: float
+        daily_breakdown:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/DailyStats'
+
+    DailyStats:
+      type: object
+      properties:
+        sessions:
+          type: integer
+        energy:
+          type: number
+          format: float
+        cost:
+          type: number
+          format: float
+        duration:
+          type: integer
+
+    RemoteStartRequest:
+      type: object
+      required:
+        - charger_id
+        - id_tag
+      properties:
+        charger_id:
+          type: string
+          example: "CP_001"
+        id_tag:
+          type: string
+          example: "USER1234"
+        connector_id:
+          type: integer
+          example: 1
+        charging_profile:
+          type: object
+          additionalProperties: true
+
+    RemoteStopRequest:
+      type: object
+      required:
+        - charger_id
+        - transaction_id
+      properties:
+        charger_id:
+          type: string
+          example: "CP_001"
+        transaction_id:
+          type: integer
+          example: 12345
+
+    UnlockConnectorRequest:
+      type: object
+      required:
+        - charger_id
+        - connector_id
+      properties:
+        charger_id:
+          type: string
+          example: "CP_001"
+        connector_id:
+          type: integer
+          example: 1
+
+    RebootRequest:
+      type: object
+      required:
+        - charger_id
+      properties:
+        charger_id:
+          type: string
+          example: "CP_001"
+        type:
+          type: string
+          enum: [Soft, Hard]
+          default: Soft
+
+    GetConfigurationRequest:
+      type: object
+      required:
+        - charger_id
+      properties:
+        charger_id:
+          type: string
+          example: "CP_001"
+        key:
+          type: array
+          items:
+            type: string
+          example: ["HeartbeatInterval", "MeterValueSampleInterval"]
+
+    SetConfigurationRequest:
+      type: object
+      required:
+        - charger_id
+        - configuration
+      properties:
+        charger_id:
+          type: string
+          example: "CP_001"
+        configuration:
+          type: object
+          additionalProperties:
+            type: string
+          example:
+            HeartbeatInterval: "120"
+
+    OCPPResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: "Accepted"
+        message_id:
+          type: string
+          example: "uuid-1234"
+        message:
+          type: string
+          example: "Command sent successfully"
+        data:
+          type: object
+          additionalProperties: true
+
+    LogEntry:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        charger_id:
+          type: string
+        type:
+          type: string
+          enum: [IN, OUT]
+        action:
+          type: string
+        message_id:
+          type: string
+        status:
+          type: string
+          enum: [Success, Error, Timeout]
+        processing_time:
+          type: number
+          format: float
+
+    LogsSummary:
+      type: object
+      properties:
+        period_hours:
+          type: integer
+        start_time:
+          type: string
+          format: date-time
+        end_time:
+          type: string
+          format: date-time
+        total_messages:
+          type: integer
+        in_messages:
+          type: integer
+        out_messages:
+          type: integer
+        error_messages:
+          type: integer
+        error_rate:
+          type: number
+          format: float
+        average_processing_time_ms:
+          type: number
+          format: float
+        action_breakdown:
+          type: object
+          additionalProperties:
+            type: integer
+        charger_breakdown:
+          type: object
+          additionalProperties:
+            type: integer
+
+    ExportResponse:
+      type: object
+      properties:
+        format:
+          type: string
+          enum: [json, csv]
+        content:
+          type: string
+        record_count:
+          type: integer
+        filename:
+          type: string
+
+    DiagnosticsRequest:
+      type: object
+      required:
+        - charger_id
+        - location
+      properties:
+        charger_id:
+          type: string
+          example: "CP_001"
+        location:
+          type: string
+          example: "https://cms.example.com/diagnostics/upload"
+        retries:
+          type: integer
+          default: 3
+        retry_interval:
+          type: integer
+          default: 5
+
+    InternalEventRequest:
+      type: object
+      required:
+        - action
+        - charger_id
+        - payload
+      properties:
+        action:
+          type: string
+          example: "RemoteStartTransaction"
+        charger_id:
+          type: string
+          example: "CP_001"
+        payload:
+          type: object
+          additionalProperties: true
+        source:
+          type: string
+          default: "laravel_cms"
+        priority:
+          type: string
+          enum: [low, normal, high, urgent]
+          default: normal
+
+    InternalEventResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: "Forwarded"
+        event_id:
+          type: string
+          example: "uuid-1234"
+        action:
+          type: string
+        charger_id:
+          type: string
+        message:
+          type: string
+
+    BroadcastMessageRequest:
+      type: object
+      required:
+        - message
+      properties:
+        message:
+          type: string
+          example: "System maintenance in 30 minutes"
+        charger_ids:
+          type: array
+          items:
+            type: string
+        message_type:
+          type: string
+          default: "notification"
+
+    BroadcastResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: "Broadcasted"
+        broadcast_id:
+          type: string
+          example: "uuid-1234"
+        message:
+          type: string
+        target_count:
+          type: string
+          example: "all"
+
+    SuccessMessage:
+      type: object
+      properties:
+        message:
+          type: string
+        charger_id:
+          type: string
+
+    Error:
+      type: object
+      properties:
+        detail:
+          type: string
+        status_code:
+          type: integer
+        timestamp:
+          type: string
+          format: date-time
+
+tags:
+  - name: Root
+    description: Basic API information
+  - name: Health
+    description: System health and monitoring endpoints
+  - name: Chargers
+    description: Charger management and monitoring
+  - name: OCPP Control
+    description: OCPP remote control commands
+  - name: Logs
+    description: System logging and diagnostics
+  - name: Internal
+    description: Internal APIs for Laravel CMS integration

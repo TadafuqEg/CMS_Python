@@ -176,7 +176,7 @@ class CentralSystem(cp):
     async def on_authorize(self, id_tag, **kwargs):
         try:
             logging.info(f"Received Authorize: id_tag {id_tag}")
-            return call_result.Authorize(
+            return call_result.AuthorizePayload(
                 id_tag_info={'status': AuthorizationStatus.accepted}
             )
         except Exception as e:
@@ -200,7 +200,7 @@ class CentralSystem(cp):
     async def on_cancel_reservation(self, reservation_id, **kwargs):
         try:
             logging.info(f"Received CancelReservation: reservation_id {reservation_id}")
-            return call_result.CancelReservation(
+            return call_result.CancelReservationPayload(
                 status=ReservationStatus.accepted
             )
         except Exception as e:
@@ -211,7 +211,7 @@ class CentralSystem(cp):
     async def on_change_availability(self, connector_id, type, **kwargs):
         try:
             logging.info(f"Received ChangeAvailability: connector_id {connector_id}, type {type}")
-            return call_result.ChangeAvailability(
+            return call_result.ChangeAvailabilityPayload(
                 status=AvailabilityStatus.accepted
             )
         except Exception as e:
@@ -222,7 +222,7 @@ class CentralSystem(cp):
     async def on_change_configuration(self, key, value, **kwargs):
         try:
             logging.info(f"Received ChangeConfiguration: key {key}, value {value}")
-            return call_result.ChangeConfiguration(
+            return call_result.ChangeConfigurationPayload(
                 status=ConfigurationStatus.accepted
             )
         except Exception as e:
@@ -255,7 +255,7 @@ class CentralSystem(cp):
     async def on_data_transfer(self, vendor_id, message_id=None, data=None, **kwargs):
         try:
             logging.info(f"Received DataTransfer: vendor_id {vendor_id}, message_id {message_id}, data {data}")
-            return call_result.DataTransfer(
+            return call_result.DataTransferPayload(
                 status=DataTransferStatus.accepted
             )
         except Exception as e:
@@ -285,7 +285,7 @@ class CentralSystem(cp):
         try:
             logging.info(f"Received GetConfiguration: key {key}")
             configuration_key = [{"key": "example_key", "value": "example_value"}] if not key else []
-            return call_result.GetConfiguration(
+            return call_result.GetConfigurationPayload(
                 configuration_key=configuration_key
             )
         except Exception as e:
@@ -296,7 +296,7 @@ class CentralSystem(cp):
     async def on_get_diagnostics(self, location, start_time=None, stop_time=None, retries=None, retry_interval=None, **kwargs):
         try:
             logging.info(f"Received GetDiagnostics: location {location}, start_time {start_time}, stop_time {stop_time}")
-            return call_result.GetDiagnostics(
+            return call_result.GetDiagnosticsPayload(
                 file_name="diagnostics.log"
             )
         except Exception as e:
@@ -307,7 +307,7 @@ class CentralSystem(cp):
     async def on_get_local_list_version(self, **kwargs):
         try:
             logging.info("Received GetLocalListVersion")
-            return call_result.GetLocalListVersion(
+            return call_result.GetLocalListVersionPayload(
                 list_version=1
             )
         except Exception as e:
@@ -329,7 +329,7 @@ class CentralSystem(cp):
     async def on_meter_values(self, connector_id, transaction_id, meter_value, **kwargs):
         try:
             logging.info(f"Received MeterValues: connector_id {connector_id}, transaction_id {transaction_id}")
-            return call_result.MeterValues()
+            return call_result.MeterValuesPayload()
         except Exception as e:
             logging.error(f"Error in on_meter_values: {e}")
             raise
@@ -365,7 +365,7 @@ class CentralSystem(cp):
     async def on_reserve_now(self, connector_id, expiry_date, id_tag, reservation_id, parent_id_tag=None, **kwargs):
         try:
             logging.info(f"Received ReserveNow: connector_id {connector_id}, reservation_id {reservation_id}, id_tag {id_tag}")
-            return call_result.ReserveNow(
+            return call_result.ReserveNowPayload(
                 status=ReservationStatus.accepted
             )
         except Exception as e:
@@ -376,7 +376,7 @@ class CentralSystem(cp):
     async def on_reset(self, type, **kwargs):
         try:
             logging.info(f"Received Reset: type {type}")
-            return call_result.Reset(
+            return call_result.ResetPayload(
                 status=ResetStatus.accepted
             )
         except Exception as e:
@@ -387,7 +387,7 @@ class CentralSystem(cp):
     async def on_send_local_list(self, list_version, update_type, local_authorization_list=None, **kwargs):
         try:
             logging.info(f"Received SendLocalList: list_version {list_version}, update_type {update_type}")
-            return call_result.SendLocalList(
+            return call_result.SendLocalListPayload(
                 status=DataTransferStatus.accepted
             )
         except Exception as e:
@@ -410,7 +410,7 @@ class CentralSystem(cp):
         try:
             self.transaction_counter += 1  # Increment transaction counter
             logging.info(f"Received StartTransaction: connector_id {connector_id}, id_tag {id_tag}, transaction_id {self.transaction_counter}")
-            return call_result.StartTransaction(
+            return call_result.StartTransactionPayload(
                 transaction_id=self.transaction_counter,
                 id_tag_info={'status': AuthorizationStatus.accepted}
             )
@@ -422,16 +422,16 @@ class CentralSystem(cp):
     async def on_status_notification(self, connector_id, error_code, status, **kwargs):
         try:
             logging.info(f"Received StatusNotification: connector_id {connector_id}, status {status}, error_code {error_code}")
-            return call_result.StatusNotification()
+            return call_result.StatusNotificationPayload()
         except Exception as e:
             logging.error(f"Error in on_status_notification: {e}")
             raise
 
     @on(Action.StopTransaction)
-    async def on_stop_transaction(self, transaction_id, id_tag, meter_stop, timestamp, **kwargs):
+    async def on_stop_transaction(self, transaction_id, timestamp, meter_stop, reason=None, id_tag=None, **kwargs):
         try:
-            logging.info(f"Received StopTransaction: transaction_id {transaction_id}, id_tag {id_tag}")
-            return call_result.StopTransaction(
+            logging.info(f"Received StopTransaction: transaction_id {transaction_id}, id_tag {id_tag}, reason {reason}")
+            return call_result.StopTransactionPayload(
                 id_tag_info={'status': AuthorizationStatus.accepted}
             )
         except Exception as e:
@@ -453,7 +453,7 @@ class CentralSystem(cp):
     async def on_unlock_connector(self, connector_id, **kwargs):
         try:
             logging.info(f"Received UnlockConnector: connector_id {connector_id}")
-            return call_result.UnlockConnector(
+            return call_result.UnlockConnectorPayload(
                 status='Unlocked'
             )
         except Exception as e:
@@ -464,7 +464,7 @@ class CentralSystem(cp):
     async def on_update_firmware(self, location, retrieve_date, retries=None, retry_interval=None, **kwargs):
         try:
             logging.info(f"Received UpdateFirmware: location {location}, retrieve_date {retrieve_date}")
-            return call_result.UpdateFirmware()
+            return call_result.UpdateFirmwarePayload()
         except Exception as e:
             logging.error(f"Error in on_update_firmware: {e}")
             raise
