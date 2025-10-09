@@ -6,7 +6,7 @@ import websockets
 from typing import Dict, Set
 from ocpp.routing import on
 from ocpp.v16 import ChargePoint as cp
-from ocpp.v16 import call_result
+from ocpp.v16 import call_result, call
 from ocpp.v16.enums import (
     Action,
     RegistrationStatus,
@@ -25,7 +25,17 @@ from ocpp.v16.enums import (
     MessageTrigger
 )
 
-logging.basicConfig(level=logging.DEBUG)  # Set to DEBUG for detailed logging
+# Configure logging to show only important messages
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%H:%M:%S'
+)
+
+# Reduce verbosity of specific loggers
+logging.getLogger('websockets').setLevel(logging.WARNING)
+logging.getLogger('asyncio').setLevel(logging.WARNING)
+logging.getLogger('ocpp').setLevel(logging.INFO)
 
 # Global client manager to track all connected clients
 class ClientManager:
@@ -58,7 +68,7 @@ class ClientManager:
         """Broadcast a message to all connected clients"""
         if not self.clients:
             logging.warning("No clients connected to broadcast to")
-            return
+            return False
             
         tasks = []
         disconnected_clients = []
@@ -81,8 +91,11 @@ class ClientManager:
             try:
                 await asyncio.gather(*tasks, return_exceptions=True)
                 logging.info(f"Broadcasted message to {len(tasks)} clients")
+                return True
             except Exception as e:
                 logging.error(f"Error broadcasting message: {e}")
+                return False
+        return False
                 
     async def handle_master_connection(self, websocket: websockets.WebSocketServerProtocol, path: str):
         """Handle master connections for broadcasting"""
@@ -92,7 +105,20 @@ class ClientManager:
             async for message in websocket:
                 logging.info(f"Master connection received message: {message}")
                 # Broadcast the message to all clients
-                await self.broadcast_to_all_clients(message)
+                success = await self.broadcast_to_all_clients(message)
+                
+                # Send feedback to master connection about broadcast status
+                if success:
+                    feedback = {"status": "success", "message": "Message broadcasted to all connected clients"}
+                else:
+                    feedback = {"status": "warning", "message": "No clients connected to receive the message"}
+                
+                try:
+                    import json
+                    feedback_message = [2, "feedback", "StatusNotification", feedback]
+                    await websocket.send(json.dumps(feedback_message))
+                except Exception as e:
+                    logging.error(f"Error sending feedback to master connection: {e}")
                 
         except websockets.exceptions.ConnectionClosed:
             logging.info("Master connection closed")
@@ -100,6 +126,30 @@ class ClientManager:
             logging.error(f"Error handling master connection: {e}")
         finally:
             self.remove_master_connection(websocket)
+    
+    async def send_remote_start_to_charger(self, charger_id: str, id_tag: str, connector_id: int = None):
+        """Send RemoteStartTransaction to a specific charger"""
+        if charger_id in self.clients:
+            central_system = self.clients[charger_id]
+            try:
+                return await central_system.send_remote_start_transaction(id_tag, connector_id)
+            except Exception as e:
+                logging.error(f"Error sending remote start to {charger_id}: {e}")
+                raise
+        else:
+            raise ValueError(f"Charger {charger_id} not found")
+    
+    async def send_remote_stop_to_charger(self, charger_id: str, transaction_id: int):
+        """Send RemoteStopTransaction to a specific charger"""
+        if charger_id in self.clients:
+            central_system = self.clients[charger_id]
+            try:
+                return await central_system.send_remote_stop_transaction(transaction_id)
+            except Exception as e:
+                logging.error(f"Error sending remote stop to {charger_id}: {e}")
+                raise
+        else:
+            raise ValueError(f"Charger {charger_id} not found")
 
 # Global client manager instance
 client_manager = ClientManager()
@@ -110,7 +160,6 @@ class CentralSystem(cp):
         self.charge_point_id = charge_point_id
         self.websocket = websocket
         self.transaction_counter = 0  # Initialize transaction counter
-        logging.debug("CentralSystem initialized with route_map: %s", self.route_map)
         
         # Register this client with the global manager
         client_manager.add_client(charge_point_id, self)
@@ -123,7 +172,7 @@ class CentralSystem(cp):
             # Remove client from manager when connection closes
             client_manager.remove_client(self.charge_point_id)
 
-    @on(Action.authorize)
+    @on(Action.Authorize)
     async def on_authorize(self, id_tag, **kwargs):
         try:
             logging.info(f"Received Authorize: id_tag {id_tag}")
@@ -134,12 +183,12 @@ class CentralSystem(cp):
             logging.error(f"Error in on_authorize: {e}")
             raise
 
-    @on(Action.boot_notification)
-    async def on_boot_notification(self, charge_point_model, charge_point_vendor, firmware_version, **kwargs):
+    @on(Action.BootNotification)
+    async def on_boot_notification(self, **kwargs):
         try:
-            logging.info(f"Received BootNotification from {charge_point_model}, {charge_point_vendor}, firmware: {firmware_version}")
-            return call_result.BootNotification(
-                current_time=datetime.utcnow().isoformat(),
+            logging.info(f"Received BootNotification: {kwargs}")
+            return call_result.BootNotificationPayload(
+                current_time=datetime.now().isoformat(),
                 interval=60,
                 status=RegistrationStatus.accepted
             )
@@ -147,7 +196,7 @@ class CentralSystem(cp):
             logging.error(f"Error in on_boot_notification: {e}")
             raise
 
-    @on(Action.cancel_reservation)
+    @on(Action.CancelReservation)
     async def on_cancel_reservation(self, reservation_id, **kwargs):
         try:
             logging.info(f"Received CancelReservation: reservation_id {reservation_id}")
@@ -158,7 +207,7 @@ class CentralSystem(cp):
             logging.error(f"Error in on_cancel_reservation: {e}")
             raise
 
-    @on(Action.change_availability)
+    @on(Action.ChangeAvailability)
     async def on_change_availability(self, connector_id, type, **kwargs):
         try:
             logging.info(f"Received ChangeAvailability: connector_id {connector_id}, type {type}")
@@ -169,7 +218,7 @@ class CentralSystem(cp):
             logging.error(f"Error in on_change_availability: {e}")
             raise
 
-    @on(Action.change_configuration)
+    @on(Action.ChangeConfiguration)
     async def on_change_configuration(self, key, value, **kwargs):
         try:
             logging.info(f"Received ChangeConfiguration: key {key}, value {value}")
@@ -180,7 +229,7 @@ class CentralSystem(cp):
             logging.error(f"Error in on_change_configuration: {e}")
             raise
 
-    @on(Action.clear_cache)
+    @on(Action.ClearCache)
     async def on_clear_cache(self, **kwargs):
         try:
             logging.info("Received ClearCache")
@@ -191,7 +240,7 @@ class CentralSystem(cp):
             logging.error(f"Error in on_clear_cache: {e}")
             raise
 
-    @on(Action.clear_charging_profile)
+    @on(Action.ClearChargingProfile)
     async def on_clear_charging_profile(self, id=None, connector_id=None, charging_profile_purpose=None, stack_level=None, **kwargs):
         try:
             logging.info(f"Received ClearChargingProfile: id {id}, connector_id {connector_id}, purpose {charging_profile_purpose}, stack_level {stack_level}")
@@ -202,7 +251,7 @@ class CentralSystem(cp):
             logging.error(f"Error in on_clear_charging_profile: {e}")
             raise
 
-    @on(Action.data_transfer)
+    @on(Action.DataTransfer)
     async def on_data_transfer(self, vendor_id, message_id=None, data=None, **kwargs):
         try:
             logging.info(f"Received DataTransfer: vendor_id {vendor_id}, message_id {message_id}, data {data}")
@@ -213,7 +262,7 @@ class CentralSystem(cp):
             logging.error(f"Error in on_data_transfer: {e}")
             raise
 
-    @on(Action.diagnostics_status_notification)
+    @on(Action.DiagnosticsStatusNotification)
     async def on_diagnostics_status_notification(self, status, **kwargs):
         try:
             logging.info(f"Received DiagnosticsStatusNotification: status {status}")
@@ -222,7 +271,7 @@ class CentralSystem(cp):
             logging.error(f"Error in on_diagnostics_status_notification: {e}")
             raise
 
-    @on(Action.firmware_status_notification)
+    @on(Action.FirmwareStatusNotification)
     async def on_firmware_status_notification(self, status, **kwargs):
         try:
             logging.info(f"Received FirmwareStatusNotification: status {status}")
@@ -231,7 +280,7 @@ class CentralSystem(cp):
             logging.error(f"Error in on_firmware_status_notification: {e}")
             raise
 
-    @on(Action.get_configuration)
+    @on(Action.GetConfiguration)
     async def on_get_configuration(self, key=None, **kwargs):
         try:
             logging.info(f"Received GetConfiguration: key {key}")
@@ -243,7 +292,7 @@ class CentralSystem(cp):
             logging.error(f"Error in on_get_configuration: {e}")
             raise
 
-    @on(Action.get_diagnostics)
+    @on(Action.GetDiagnostics)
     async def on_get_diagnostics(self, location, start_time=None, stop_time=None, retries=None, retry_interval=None, **kwargs):
         try:
             logging.info(f"Received GetDiagnostics: location {location}, start_time {start_time}, stop_time {stop_time}")
@@ -254,7 +303,7 @@ class CentralSystem(cp):
             logging.error(f"Error in on_get_diagnostics: {e}")
             raise
 
-    @on(Action.get_local_list_version)
+    @on(Action.GetLocalListVersion)
     async def on_get_local_list_version(self, **kwargs):
         try:
             logging.info("Received GetLocalListVersion")
@@ -265,18 +314,18 @@ class CentralSystem(cp):
             logging.error(f"Error in on_get_local_list_version: {e}")
             raise
 
-    @on(Action.heartbeat)
+    @on(Action.Heartbeat)
     async def on_heartbeat(self, **kwargs):
         try:
             logging.info("Received Heartbeat")
-            return call_result.Heartbeat(
-                current_time=datetime.utcnow().isoformat()
+            return call_result.HeartbeatPayload(
+                current_time=datetime.now().isoformat()
             )
         except Exception as e:
             logging.error(f"Error in on_heartbeat: {e}")
             raise
 
-    @on(Action.meter_values)
+    @on(Action.MeterValues)
     async def on_meter_values(self, connector_id, transaction_id, meter_value, **kwargs):
         try:
             logging.info(f"Received MeterValues: connector_id {connector_id}, transaction_id {transaction_id}")
@@ -285,29 +334,34 @@ class CentralSystem(cp):
             logging.error(f"Error in on_meter_values: {e}")
             raise
 
-    @on(Action.remote_start_transaction)
-    async def on_remote_start_transaction(self, id_tag, connector_id=None, **kwargs):
+    async def send_remote_start_transaction(self, id_tag, connector_id=None):
+        """Send RemoteStartTransaction command to the charger"""
         try:
-            logging.info(f"Received RemoteStartTransaction: id_tag {id_tag}, connector_id {connector_id}")
-            return call_result.RemoteStartTransaction(
-                status=RemoteStartStopStatus.accepted
+            logging.info(f"Sending RemoteStartTransaction: id_tag {id_tag}, connector_id {connector_id}")
+            return await self.call(
+                call.RemoteStartTransaction(
+                    id_tag=id_tag,
+                    connector_id=connector_id
+                )
             )
         except Exception as e:
-            logging.error(f"Error in on_remote_start_transaction: {e}")
+            logging.error(f"Error sending RemoteStartTransaction: {e}")
             raise
 
-    @on(Action.remote_stop_transaction)
-    async def on_remote_stop_transaction(self, transaction_id, **kwargs):
+    async def send_remote_stop_transaction(self, transaction_id):
+        """Send RemoteStopTransaction command to the charger"""
         try:
-            logging.info(f"Received RemoteStopTransaction: transaction_id {transaction_id}")
-            return call_result.RemoteStopTransaction(
-                status=RemoteStartStopStatus.accepted
+            logging.info(f"Sending RemoteStopTransaction: transaction_id {transaction_id}")
+            return await self.call(
+                call.RemoteStopTransaction(
+                    transaction_id=transaction_id
+                )
             )
         except Exception as e:
-            logging.error(f"Error in on_remote_stop_transaction: {e}")
+            logging.error(f"Error sending RemoteStopTransaction: {e}")
             raise
 
-    @on(Action.reserve_now)
+    @on(Action.ReserveNow)
     async def on_reserve_now(self, connector_id, expiry_date, id_tag, reservation_id, parent_id_tag=None, **kwargs):
         try:
             logging.info(f"Received ReserveNow: connector_id {connector_id}, reservation_id {reservation_id}, id_tag {id_tag}")
@@ -318,7 +372,7 @@ class CentralSystem(cp):
             logging.error(f"Error in on_reserve_now: {e}")
             raise
 
-    @on(Action.reset)
+    @on(Action.Reset)
     async def on_reset(self, type, **kwargs):
         try:
             logging.info(f"Received Reset: type {type}")
@@ -329,7 +383,7 @@ class CentralSystem(cp):
             logging.error(f"Error in on_reset: {e}")
             raise
 
-    @on(Action.send_local_list)
+    @on(Action.SendLocalList)
     async def on_send_local_list(self, list_version, update_type, local_authorization_list=None, **kwargs):
         try:
             logging.info(f"Received SendLocalList: list_version {list_version}, update_type {update_type}")
@@ -340,7 +394,7 @@ class CentralSystem(cp):
             logging.error(f"Error in on_send_local_list: {e}")
             raise
 
-    @on(Action.set_charging_profile)
+    @on(Action.SetChargingProfile)
     async def on_set_charging_profile(self, connector_id, cs_charging_profiles, **kwargs):
         try:
             logging.info(f"Received SetChargingProfile: connector_id {connector_id}, profiles {cs_charging_profiles}")
@@ -351,7 +405,7 @@ class CentralSystem(cp):
             logging.error(f"Error in on_set_charging_profile: {e}")
             raise
 
-    @on(Action.start_transaction)
+    @on(Action.StartTransaction)
     async def on_start_transaction(self, connector_id, id_tag, meter_start, timestamp, **kwargs):
         try:
             self.transaction_counter += 1  # Increment transaction counter
@@ -364,7 +418,7 @@ class CentralSystem(cp):
             logging.error(f"Error in on_start_transaction: {e}")
             raise
 
-    @on(Action.status_notification)
+    @on(Action.StatusNotification)
     async def on_status_notification(self, connector_id, error_code, status, **kwargs):
         try:
             logging.info(f"Received StatusNotification: connector_id {connector_id}, status {status}, error_code {error_code}")
@@ -373,7 +427,7 @@ class CentralSystem(cp):
             logging.error(f"Error in on_status_notification: {e}")
             raise
 
-    @on(Action.stop_transaction)
+    @on(Action.StopTransaction)
     async def on_stop_transaction(self, transaction_id, id_tag, meter_stop, timestamp, **kwargs):
         try:
             logging.info(f"Received StopTransaction: transaction_id {transaction_id}, id_tag {id_tag}")
@@ -384,7 +438,7 @@ class CentralSystem(cp):
             logging.error(f"Error in on_stop_transaction: {e}")
             raise
 
-    @on(Action.trigger_message)
+    @on(Action.TriggerMessage)
     async def on_trigger_message(self, requested_message, connector_id=None, **kwargs):
         try:
             logging.info(f"Received TriggerMessage: requested_message {requested_message}, connector_id {connector_id}")
@@ -395,7 +449,7 @@ class CentralSystem(cp):
             logging.error(f"Error in on_trigger_message: {e}")
             raise
 
-    @on(Action.unlock_connector)
+    @on(Action.UnlockConnector)
     async def on_unlock_connector(self, connector_id, **kwargs):
         try:
             logging.info(f"Received UnlockConnector: connector_id {connector_id}")
@@ -406,7 +460,7 @@ class CentralSystem(cp):
             logging.error(f"Error in on_unlock_connector: {e}")
             raise
 
-    @on(Action.update_firmware)
+    @on(Action.UpdateFirmware)
     async def on_update_firmware(self, location, retrieve_date, retries=None, retry_interval=None, **kwargs):
         try:
             logging.info(f"Received UpdateFirmware: location {location}, retrieve_date {retrieve_date}")
@@ -415,13 +469,57 @@ class CentralSystem(cp):
             logging.error(f"Error in on_update_firmware: {e}")
             raise
 
+    @on(Action.RemoteStartTransaction)
+    async def on_remote_start_transaction(self, id_tag, connector_id=None, **kwargs):
+        """Handle RemoteStartTransaction command from central system"""
+        try:
+            logging.info(f"Received RemoteStartTransaction: id_tag {id_tag}, connector_id {connector_id}")
+            
+            # Simulate starting a transaction
+            # In a real implementation, this would start the actual charging process
+            self.transaction_counter += 1
+            
+            # Return success response using proper dataclass
+            return call_result.RemoteStartTransactionPayload(
+                status=RemoteStartStopStatus.accepted
+            )
+        except Exception as e:
+            logging.error(f"Error in on_remote_start_transaction: {e}")
+            raise
+
+    @on(Action.RemoteStopTransaction)
+    async def on_remote_stop_transaction(self, transaction_id, **kwargs):
+        """Handle RemoteStopTransaction command from central system"""
+        try:
+            logging.info(f"Received RemoteStopTransaction: transaction_id {transaction_id}")
+            
+            # Simulate stopping a transaction
+            # In a real implementation, this would stop the actual charging process
+            
+            # Return success response using proper dataclass
+            return call_result.RemoteStopTransactionPayload(
+                status=RemoteStartStopStatus.accepted
+            )
+        except Exception as e:
+            logging.error(f"Error in on_remote_stop_transaction: {e}")
+            raise
+
 async def handle_client_connection(websocket, path):
     """Handle regular client connections"""
     charge_point_id = path.split('/')[-1]
     logging.info(f"Client connecting: {charge_point_id}")
     
     central_system = CentralSystem(charge_point_id, websocket)
-    await central_system.start()
+    try:
+        await central_system.start()
+    except websockets.exceptions.ConnectionClosedOK:
+        # Normal client disconnect - not an error
+        logging.info(f"Client {charge_point_id} disconnected normally")
+    except websockets.exceptions.ConnectionClosed:
+        # Client disconnected unexpectedly
+        logging.warning(f"Client {charge_point_id} disconnected unexpectedly")
+    except Exception as e:
+        logging.error(f"Error handling client {charge_point_id}: {e}")
 
 async def main():
     try:
