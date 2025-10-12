@@ -165,9 +165,19 @@ class CentralSystem(cp):
         client_manager.add_client(charge_point_id, self)
         
     async def start(self):
-        """Override start method to handle cleanup"""
+        """Override start method to handle cleanup and malformed messages"""
         try:
             await super().start()
+        except Exception as e:
+            # Check if it's a FormatViolationError from malformed JSON
+            if "FormatViolationError" in str(e) or "Message is not valid JSON" in str(e):
+                logging.warning(f"Received malformed message from {self.charge_point_id}: {e}")
+                logging.warning("Continuing to handle other messages...")
+                # Don't re-raise the error, just log it and continue
+                return
+            else:
+                # Re-raise other errors
+                raise
         finally:
             # Remove client from manager when connection closes
             client_manager.remove_client(self.charge_point_id)
@@ -255,6 +265,19 @@ class CentralSystem(cp):
     async def on_data_transfer(self, vendor_id, message_id=None, data=None, **kwargs):
         try:
             logging.info(f"Received DataTransfer: vendor_id {vendor_id}, message_id {message_id}, data {data}")
+            
+            # Handle malformed JSON in data field
+            if isinstance(data, str):
+                try:
+                    # Try to parse the data as JSON to validate it
+                    import json
+                    json.loads(data)
+                    logging.info(f"DataTransfer data is valid JSON: {data}")
+                except json.JSONDecodeError as json_err:
+                    logging.warning(f"DataTransfer contains invalid JSON in data field: {json_err}")
+                    logging.warning(f"Raw data: {data}")
+                    # Still accept the message but log the issue
+                    
             return call_result.DataTransferPayload(
                 status=DataTransferStatus.accepted
             )
@@ -505,11 +528,72 @@ class CentralSystem(cp):
             raise
 
 async def handle_client_connection(websocket, path):
-    """Handle regular client connections"""
+    """Handle regular client connections with custom message parsing"""
     charge_point_id = path.split('/')[-1]
     logging.info(f"Client connecting: {charge_point_id}")
     
-    central_system = CentralSystem(charge_point_id, websocket)
+    # Create a custom websocket wrapper to handle malformed messages
+    class CustomWebSocket:
+        def __init__(self, websocket):
+            self.websocket = websocket
+            
+        async def recv(self):
+            """Custom recv that handles malformed JSON"""
+            try:
+                message = await self.websocket.recv()
+                
+                # Try to parse the message to check for JSON issues
+                import json
+                try:
+                    parsed = json.loads(message)
+                    
+                    # Check if it's a DataTransfer message with malformed data field
+                    if (isinstance(parsed, list) and len(parsed) >= 4 and 
+                        parsed[2] == "DataTransfer" and isinstance(parsed[3], dict)):
+                        
+                        data_field = parsed[3].get("data")
+                        if isinstance(data_field, str):
+                            try:
+                                # Try to parse the data field as JSON
+                                json.loads(data_field)
+                            except json.JSONDecodeError:
+                                logging.warning(f"Detected malformed JSON in DataTransfer data field")
+                                logging.warning(f"Original message: {message}")
+                                
+                                # Fix the malformed JSON by escaping quotes in the data field
+                                try:
+                                    # Extract the data field and fix it
+                                    data_value = parsed[3]["data"]
+                                    # Escape quotes in the data field
+                                    fixed_data = data_value.replace('"', '\\"')
+                                    parsed[3]["data"] = fixed_data
+                                    
+                                    # Reconstruct the message
+                                    fixed_message = json.dumps(parsed)
+                                    logging.info(f"Fixed malformed JSON message")
+                                    return fixed_message
+                                except Exception as fix_err:
+                                    logging.error(f"Failed to fix malformed JSON: {fix_err}")
+                                    # Return original message and let OCPP handle the error
+                                    
+                except json.JSONDecodeError:
+                    # Not a JSON message, return as-is
+                    pass
+                    
+                return message
+                
+            except Exception as e:
+                logging.error(f"Error in custom recv: {e}")
+                raise
+                
+        def __getattr__(self, name):
+            """Delegate all other attributes to the original websocket"""
+            return getattr(self.websocket, name)
+    
+    # Use the custom websocket wrapper
+    custom_websocket = CustomWebSocket(websocket)
+    central_system = CentralSystem(charge_point_id, custom_websocket)
+    
     try:
         await central_system.start()
     except websockets.exceptions.ConnectionClosedOK:
