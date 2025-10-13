@@ -10,14 +10,14 @@ import ssl
 import time
 import uuid
 from datetime import datetime
-from typing import Dict, Set, Optional, Any
+from typing import Dict, Set, Optional, Any, List
 from dataclasses import dataclass
 
 import websockets
 from websockets.server import WebSocketServerProtocol
 from fastapi import WebSocket
 
-from app.models.database import SessionLocal, Charger, Connector, Session as DBSession, MessageLog
+from app.models.database import SessionLocal, Charger, Connector, Session as DBSession, MessageLog, ConnectionEvent
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -159,6 +159,9 @@ class OCPPHandler:
         """Handle charger WebSocket connection"""
         logger.info(f"Charger {charger_id} connecting...")
         
+        # Generate unique connection ID
+        connection_id = str(uuid.uuid4())
+        
         # Add connection
         self.charger_connections[charger_id] = websocket
         self.stats["connections_total"] += 1
@@ -167,6 +170,9 @@ class OCPPHandler:
         # Update charger status in database
         await self.update_charger_connection_status(charger_id, True)
         
+        # Log connection event
+        await self.log_connection_event(charger_id, "CONNECT", websocket, connection_id=connection_id)
+        
         try:
             # Handle messages from charger
             async for message in websocket:
@@ -174,10 +180,16 @@ class OCPPHandler:
                 
         except websockets.exceptions.ConnectionClosed:
             logger.info(f"Charger {charger_id} disconnected")
+            # Log disconnect event
+            await self.log_connection_event(charger_id, "DISCONNECT", websocket, 
+                                          reason="Connection closed", connection_id=connection_id)
         except Exception as e:
             logger.error(f"Error handling charger {charger_id}: {e}")
+            # Log disconnect event with error
+            await self.log_connection_event(charger_id, "DISCONNECT", websocket, 
+                                          reason=f"Error: {str(e)}", connection_id=connection_id)
         finally:
-            await self.remove_charger_connection(charger_id)
+            await self.remove_charger_connection(charger_id, connection_id)
     
     async def handle_master_connection(self, websocket: WebSocketServerProtocol, path: str):
         """Handle master connection for broadcasting"""
@@ -538,7 +550,7 @@ class OCPPHandler:
             except Exception as e:
                 logger.error(f"Error broadcasting message: {e}")
     
-    async def remove_charger_connection(self, charger_id: str):
+    async def remove_charger_connection(self, charger_id: str, connection_id: str = None):
         """Remove charger connection and update status"""
         if charger_id in self.charger_connections:
             del self.charger_connections[charger_id]
@@ -599,6 +611,63 @@ class OCPPHandler:
             db.commit()
         except Exception as e:
             logger.error(f"Failed to log message: {e}")
+        finally:
+            db.close()
+    
+    async def log_connection_event(self, charger_id: str, event_type: str, websocket: WebSocketServerProtocol = None, 
+                                  reason: str = None, connection_id: str = None):
+        """Log WebSocket connection event to database"""
+        db = SessionLocal()
+        try:
+            # Extract connection information from websocket if available
+            remote_address = None
+            user_agent = None
+            subprotocol = None
+            
+            if websocket:
+                try:
+                    remote_address = websocket.remote_address[0] if websocket.remote_address else None
+                    user_agent = websocket.request_headers.get('User-Agent')
+                    subprotocol = websocket.subprotocol
+                except Exception as e:
+                    logger.warning(f"Could not extract websocket info: {e}")
+            
+            # Calculate session duration for disconnect events
+            session_duration = None
+            if event_type == "DISCONNECT" and connection_id:
+                # Try to find the corresponding connect event
+                connect_event = db.query(ConnectionEvent).filter(
+                    ConnectionEvent.charger_id == charger_id,
+                    ConnectionEvent.event_type == "CONNECT",
+                    ConnectionEvent.connection_id == connection_id
+                ).order_by(ConnectionEvent.timestamp.desc()).first()
+                
+                if connect_event:
+                    session_duration = int((datetime.utcnow() - connect_event.timestamp).total_seconds())
+            
+            # Create connection event log
+            event_log = ConnectionEvent(
+                charger_id=charger_id,
+                event_type=event_type,
+                connection_id=connection_id,
+                remote_address=remote_address,
+                user_agent=user_agent,
+                subprotocol=subprotocol,
+                reason=reason,
+                session_duration=session_duration,
+                event_metadata={
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "event_source": "ocpp_handler"
+                }
+            )
+            
+            db.add(event_log)
+            db.commit()
+            
+            logger.info(f"Logged {event_type} event for charger {charger_id}")
+            
+        except Exception as e:
+            logger.error(f"Failed to log connection event: {e}")
         finally:
             db.close()
     
@@ -693,3 +762,36 @@ class OCPPHandler:
             "master_connections": len(self.master_connections),
             "pending_messages": len(self.pending_messages)
         }
+    
+    def get_connection_events(self, charger_id: str = None, limit: int = 100) -> List[Dict[str, Any]]:
+        """Get connection events from database"""
+        db = SessionLocal()
+        try:
+            query = db.query(ConnectionEvent)
+            
+            if charger_id:
+                query = query.filter(ConnectionEvent.charger_id == charger_id)
+            
+            events = query.order_by(ConnectionEvent.timestamp.desc()).limit(limit).all()
+            
+            return [
+                {
+                    "id": event.id,
+                    "charger_id": event.charger_id,
+                    "event_type": event.event_type,
+                    "connection_id": event.connection_id,
+                    "remote_address": event.remote_address,
+                    "user_agent": event.user_agent,
+                    "subprotocol": event.subprotocol,
+                    "reason": event.reason,
+                    "session_duration": event.session_duration,
+                    "timestamp": event.timestamp.isoformat(),
+                    "event_metadata": event.event_metadata
+                }
+                for event in events
+            ]
+        except Exception as e:
+            logger.error(f"Failed to get connection events: {e}")
+            return []
+        finally:
+            db.close()

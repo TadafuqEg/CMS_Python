@@ -11,7 +11,7 @@ from pydantic import BaseModel
 import uuid
 import json
 
-from app.models.database import get_db, Charger, Session as DBSession
+from app.models.database import get_db, Charger, Session as DBSession, ConnectionEvent
 from app.services.ocpp_handler import OCPPHandler
 from app.services.session_manager import SessionManager
 
@@ -52,6 +52,19 @@ class OCPPStats(BaseModel):
     master_connections: int
     pending_messages: int
     active_chargers: List[ConnectionStats]
+
+class ConnectionEventResponse(BaseModel):
+    id: int
+    charger_id: str
+    event_type: str
+    connection_id: Optional[str] = None
+    remote_address: Optional[str] = None
+    user_agent: Optional[str] = None
+    subprotocol: Optional[str] = None
+    reason: Optional[str] = None
+    session_duration: Optional[int] = None
+    timestamp: str
+    event_metadata: Optional[Dict[str, Any]] = None
 
 
 @router.post("/charging/start", include_in_schema=True)
@@ -728,6 +741,81 @@ async def get_stats_summary(request: Request):
         "pending_messages": stats.get("pending_messages", 0),
         "connected_charger_ids": list(ocpp_handler.charger_connections.keys())
     }
+
+
+# --- Connection Events endpoints ---
+
+@router.get("/connection-events", response_model=List[ConnectionEventResponse], include_in_schema=True)
+async def get_connection_events(
+    charger_id: Optional[str] = None, 
+    limit: int = 100, 
+    request: Request = None, 
+    db: Session = Depends(get_db)
+):
+    """
+    Get WebSocket connection events from database.
+    """
+    ocpp_handler = getattr(request.app.state, "ocpp_handler", None)
+    if not ocpp_handler:
+        raise HTTPException(status_code=500, detail="OCPP handler not available")
+    
+    # Get events from OCPP handler
+    events = ocpp_handler.get_connection_events(charger_id=charger_id, limit=limit)
+    
+    return [ConnectionEventResponse(**event) for event in events]
+
+
+@router.get("/connection-events/{charger_id}", response_model=List[ConnectionEventResponse], include_in_schema=True)
+async def get_charger_connection_events(
+    charger_id: str, 
+    limit: int = 100, 
+    request: Request = None, 
+    db: Session = Depends(get_db)
+):
+    """
+    Get connection events for a specific charger.
+    """
+    ocpp_handler = getattr(request.app.state, "ocpp_handler", None)
+    if not ocpp_handler:
+        raise HTTPException(status_code=500, detail="OCPP handler not available")
+    
+    # Get events for specific charger
+    events = ocpp_handler.get_connection_events(charger_id=charger_id, limit=limit)
+    
+    return [ConnectionEventResponse(**event) for event in events]
+
+
+@router.get("/connection-events/stats", include_in_schema=True)
+async def get_connection_event_stats(request: Request = None, db: Session = Depends(get_db)):
+    """
+    Get statistics about connection events.
+    """
+    try:
+        # Get total connection events count
+        total_events = db.query(ConnectionEvent).count()
+        
+        # Get events by type
+        connect_events = db.query(ConnectionEvent).filter(ConnectionEvent.event_type == "CONNECT").count()
+        disconnect_events = db.query(ConnectionEvent).filter(ConnectionEvent.event_type == "DISCONNECT").count()
+        
+        # Get events by charger
+        charger_events = db.query(ConnectionEvent.charger_id, db.func.count(ConnectionEvent.id)).group_by(ConnectionEvent.charger_id).all()
+        
+        # Get recent events (last 24 hours)
+        from datetime import datetime, timedelta
+        yesterday = datetime.utcnow() - timedelta(days=1)
+        recent_events = db.query(ConnectionEvent).filter(ConnectionEvent.timestamp >= yesterday).count()
+        
+        return {
+            "total_events": total_events,
+            "connect_events": connect_events,
+            "disconnect_events": disconnect_events,
+            "recent_events_24h": recent_events,
+            "events_by_charger": [{"charger_id": charger_id, "event_count": count} for charger_id, count in charger_events]
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get connection event stats: {e}")
 
 # Make sure your router is included with the correct prefix in app.main.py:
 # app.include_router(ocpp_control.router, prefix="/api", tags=["OCPP Control"])

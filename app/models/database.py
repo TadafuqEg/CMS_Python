@@ -50,6 +50,7 @@ class Charger(Base):
     sessions = relationship("Session", back_populates="charger")
     connectors = relationship("Connector", back_populates="charger")
     messages = relationship("MessageLog", back_populates="charger")
+    connection_events = relationship("ConnectionEvent", back_populates="charger")
 
 class Connector(Base):
     """Connector model"""
@@ -153,6 +154,35 @@ class SystemConfig(Base):
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class ConnectionEvent(Base):
+    """WebSocket connection event logging"""
+    __tablename__ = "connection_events"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    charger_id = Column(String, ForeignKey("chargers.id"), nullable=False)
+    
+    # Event details
+    event_type = Column(String, nullable=False)  # CONNECT, DISCONNECT, RECONNECT
+    connection_id = Column(String, nullable=True)  # Unique connection identifier
+    
+    # Connection information
+    remote_address = Column(String, nullable=True)  # Client IP address
+    user_agent = Column(String, nullable=True)  # WebSocket user agent
+    subprotocol = Column(String, nullable=True)  # OCPP subprotocol
+    
+    # Event metadata
+    reason = Column(String, nullable=True)  # Disconnect reason, error message, etc.
+    session_duration = Column(Integer, nullable=True)  # Connection duration in seconds
+    
+    # Additional data
+    event_metadata = Column(JSON, default=dict)
+    
+    # Timestamps
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    charger = relationship("Charger", back_populates="connection_events")
 
 class User(Base):
     """User model for authentication"""
