@@ -160,6 +160,10 @@ class CentralSystem(cp):
     async def on_boot_notification(self, charge_point_model, charge_point_vendor, firmware_version, **kwargs):
         try:
             logging.info(f"Received BootNotification from {charge_point_model}, {charge_point_vendor}, firmware: {firmware_version}")
+            
+            # Save BootNotification data to database
+            await self.save_boot_notification_to_db(charge_point_model, charge_point_vendor, firmware_version, kwargs)
+            
             return call_result.BootNotificationPayload(
                 current_time=datetime.now().isoformat(),
                 interval=60,
@@ -168,6 +172,65 @@ class CentralSystem(cp):
         except Exception as e:
             logging.error(f"Error in on_boot_notification: {e}")
             raise
+
+    async def save_boot_notification_to_db(self, charge_point_model, charge_point_vendor, firmware_version, kwargs):
+        """Save BootNotification data to database"""
+        try:
+            from app.models.database import SessionLocal, Charger
+            from datetime import datetime
+            
+            db = SessionLocal()
+            try:
+                charger = db.query(Charger).filter(Charger.id == self.charge_point_id).first()
+                if not charger:
+                    logging.warning(f"Charger {self.charge_point_id} not found in database during BootNotification")
+                    charger = Charger(id=self.charge_point_id)
+                    db.add(charger)
+                
+                # Update charger with BootNotification data
+                charger.vendor = charge_point_vendor
+                charger.model = charge_point_model
+                charger.firmware_version = firmware_version
+                charger.status = "Available"
+                charger.last_heartbeat = datetime.utcnow()
+                charger.connection_time = datetime.utcnow()
+                charger.is_connected = True
+                
+                # Save all BootNotification data in configuration
+                if not charger.configuration:
+                    charger.configuration = {}
+                
+                # Store all BootNotification data
+                charger.configuration.update({
+                    "boot_notification_data": {
+                        "chargePointModel": charge_point_model,
+                        "chargePointVendor": charge_point_vendor,
+                        "firmwareVersion": firmware_version,
+                        **kwargs
+                    },
+                    "boot_notification_received_at": datetime.utcnow().isoformat(),
+                    "charge_point_vendor": charge_point_vendor,
+                    "charge_point_model": charge_point_model,
+                    "firmware_version": firmware_version,
+                    "last_boot_time": datetime.utcnow().isoformat()
+                })
+                
+                # Update charger metadata
+                charger.updated_at = datetime.utcnow()
+                
+                db.commit()
+                
+                logging.info(f"Updated charger {self.charge_point_id} with BootNotification data: vendor={charger.vendor}, model={charger.model}, firmware={charger.firmware_version}")
+                logging.info(f"Configuration updated with {len(charger.configuration)} fields")
+                
+            except Exception as e:
+                logging.error(f"Failed to update charger {self.charge_point_id} with BootNotification: {e}")
+                db.rollback()
+            finally:
+                db.close()
+                
+        except Exception as e:
+            logging.error(f"Error saving BootNotification to database: {e}")
 
     @on(Action.CancelReservation)
     async def on_cancel_reservation(self, reservation_id, **kwargs):
@@ -540,6 +603,9 @@ async def handle_client_connection(websocket, path):
     custom_websocket = CustomWebSocket(websocket)
     central_system = CentralSystem(charge_point_id, custom_websocket)
     
+    # Create charger record with default values if it doesn't exist
+    await create_charger_on_connect(charge_point_id, websocket)
+    
     try:
         await central_system.start()
     except websockets.exceptions.ConnectionClosedOK:
@@ -550,6 +616,86 @@ async def handle_client_connection(websocket, path):
         logging.warning(f"Client {charge_point_id} disconnected unexpectedly")
     except Exception as e:
         logging.error(f"Error handling client {charge_point_id}: {e}")
+
+async def create_charger_on_connect(charge_point_id, websocket):
+    """Create charger record with default values when WebSocket connects"""
+    try:
+        from app.models.database import SessionLocal, Charger
+        from datetime import datetime
+        
+        db = SessionLocal()
+        try:
+            charger = db.query(Charger).filter(Charger.id == charge_point_id).first()
+            
+            if not charger:
+                # Extract connection information from websocket
+                remote_address = None
+                user_agent = None
+                subprotocol = None
+                
+                try:
+                    remote_address = websocket.remote_address[0] if websocket.remote_address else None
+                    user_agent = websocket.request_headers.get('User-Agent')
+                    subprotocol = websocket.subprotocol
+                    logging.info(f"Extracted websocket info: remote={remote_address}, user_agent={user_agent}, subprotocol={subprotocol}")
+                except Exception as e:
+                    logging.warning(f"Could not extract websocket info: {e}")
+                
+                # Create new charger with default values
+                charger = Charger(
+                    id=charge_point_id,
+                    vendor="Unknown",
+                    model="Unknown",
+                    serial_number="Unknown",
+                    firmware_version="Unknown",
+                    status="Connecting",
+                    is_connected=True,
+                    connection_time=datetime.utcnow(),
+                    last_heartbeat=datetime.utcnow(),
+                    configuration={
+                        "remote_address": remote_address,
+                        "user_agent": user_agent,
+                        "subprotocol": subprotocol,
+                        "connection_source": "websocket"
+                    }
+                )
+                db.add(charger)
+                logging.info(f"Created new charger record for {charge_point_id} with default values")
+            else:
+                # Update existing charger connection info
+                charger.is_connected = True
+                charger.connection_time = datetime.utcnow()
+                charger.status = "Connecting"
+                charger.updated_at = datetime.utcnow()
+                
+                # Update configuration with connection info
+                if not charger.configuration:
+                    charger.configuration = {}
+                
+                try:
+                    charger.configuration.update({
+                        "remote_address": websocket.remote_address[0] if websocket.remote_address else None,
+                        "user_agent": websocket.request_headers.get('User-Agent'),
+                        "subprotocol": websocket.subprotocol,
+                        "last_connection_time": datetime.utcnow().isoformat()
+                    })
+                except Exception as e:
+                    logging.warning(f"Could not update charger configuration: {e}")
+                
+                logging.info(f"Updated existing charger record for {charge_point_id}")
+            
+            db.commit()
+            logging.info(f"Successfully committed charger {charge_point_id} to database")
+            
+        except Exception as e:
+            logging.error(f"Failed to create/update charger {charge_point_id}: {e}")
+            db.rollback()
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logging.error(f"Error creating charger on connect: {e}")
+
 async def main():
     try:
         # Create an SSL context for WSS

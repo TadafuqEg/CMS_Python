@@ -8,10 +8,11 @@ import json
 import websockets
 import requests
 import time
+import ssl
 from datetime import datetime
 
 # Test configuration
-WEBSOCKET_URL = "ws://localhost:8000"
+WEBSOCKET_URL = "wss://localhost:9000"
 FASTAPI_URL = "http://localhost:8000"
 CHARGER_ID = "TEST_CHARGER_001"
 
@@ -35,9 +36,14 @@ async def test_websocket_connection_and_boot_notification():
         print(f"   ❌ Error checking charger: {e}")
     
     # Step 2: Connect to WebSocket
-    print(f"\n2️⃣ Connecting to WebSocket: {WEBSOCKET_URL}/ocpp/{CHARGER_ID}")
+    print(f"\n2️⃣ Connecting to WebSocket: {WEBSOCKET_URL}/{CHARGER_ID}")
     try:
-        async with websockets.connect(f"{WEBSOCKET_URL}/ocpp/{CHARGER_ID}") as websocket:
+        # Create SSL context that doesn't verify certificates
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+        
+        async with websockets.connect(f"{WEBSOCKET_URL}/{CHARGER_ID}", ssl=ssl_context) as websocket:
             print(f"   ✅ WebSocket connected successfully")
             
             # Wait a moment for the connection to be processed
