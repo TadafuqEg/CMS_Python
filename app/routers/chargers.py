@@ -43,6 +43,21 @@ class ChargerUpdateRequest(BaseModel):
     organization_id: Optional[str] = None
     configuration: Optional[Dict[str, Any]] = None
 
+class ChargerCreateRequest(BaseModel):
+    id: str
+    vendor: Optional[str] = None
+    model: Optional[str] = None
+    serial_number: Optional[str] = None
+    firmware_version: Optional[str] = None
+    site_id: Optional[str] = None
+    organization_id: Optional[str] = None
+
+@router.get("/chargers/ids")
+async def get_charger_ids(db: Session = Depends(get_db)):
+    """Get a list of all charger IDs"""
+    chargers = db.query(Charger.id).all()
+    return [c.id for c in chargers]
+
 @router.get("/chargers", response_model=List[ChargerResponse])
 async def get_chargers(
     skip: int = Query(0, ge=0),
@@ -276,3 +291,37 @@ async def get_charger_statistics(
         "average_energy_per_session": total_energy / total_sessions if total_sessions > 0 else 0,
         "daily_breakdown": daily_stats
     }
+
+@router.post("/chargers")
+async def add_charger(
+    charger: ChargerCreateRequest,
+    db: Session = Depends(get_db)
+):
+    """Add a new charger"""
+    if not charger.id or charger.id.strip() == "":
+        raise HTTPException(status_code=400, detail="Charger id must not be empty")
+    existing = db.query(Charger).filter(Charger.id == charger.id).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="Charger with this id already exists")
+    new_charger = Charger(
+        id=charger.id,
+        vendor=charger.vendor,
+        model=charger.model,
+        serial_number=charger.serial_number,
+        firmware_version=charger.firmware_version,
+        site_id=charger.site_id,
+        organization_id=charger.organization_id,
+        status="Offline",
+        is_connected=False
+    )
+    db.add(new_charger)
+    db.commit()
+    db.refresh(new_charger)
+    return {"message": "Charger added successfully", "charger_id": new_charger.id}
+
+@router.post("/chargers/cleanup_empty")
+async def cleanup_empty_chargers(db: Session = Depends(get_db)):
+    """Delete chargers with empty or whitespace-only IDs"""
+    deleted = db.query(Charger).filter((Charger.id == "") | (Charger.id == None) | (Charger.id == " ")).delete(synchronize_session=False)
+    db.commit()
+    return {"message": f"Deleted {deleted} chargers with empty IDs."}

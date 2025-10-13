@@ -5,7 +5,6 @@ Security utilities for JWT authentication and authorization
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 import jwt
-from jwt import PyJWTError
 from fastapi import HTTPException, status
 from app.core.config import settings
 
@@ -26,7 +25,7 @@ def verify_token(token: str) -> Dict[str, Any]:
     try:
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
         return payload
-    except PyJWTError:
+    except jwt.InvalidTokenError:  # Updated from PyJWTError
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Could not validate credentials",
@@ -35,7 +34,6 @@ def verify_token(token: str) -> Dict[str, Any]:
 
 def check_permission(user_roles: list, required_permission: str) -> bool:
     """Check if user has required permission"""
-    # Define role-based permissions
     role_permissions = {
         "admin": [
             "chargers:read", "chargers:write", "chargers:delete",
@@ -69,8 +67,6 @@ def require_permission(permission: str):
     """Decorator to require specific permission"""
     def decorator(func):
         def wrapper(*args, **kwargs):
-            # This would be used with dependency injection in FastAPI
-            # For now, it's a placeholder for permission checking
             return func(*args, **kwargs)
         return wrapper
-    return decorator
+    return decorator    

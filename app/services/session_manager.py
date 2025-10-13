@@ -8,6 +8,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Dict, Set, Optional, Any, List
 from dataclasses import dataclass, asdict
+from sqlalchemy import func
 
 from fastapi import WebSocket
 from sqlalchemy.orm import Session

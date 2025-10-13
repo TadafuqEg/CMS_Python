@@ -1,2 +1,7 @@
 /venv
 /csms.db
+/app/__pycache__
+/app/core/__pycache__
+/app/models/__pycache__
+/app/routers/__pycache__
+/app/services/__pycache__

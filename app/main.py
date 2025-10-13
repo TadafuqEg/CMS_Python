@@ -59,6 +59,8 @@ async def lifespan(app: FastAPI):
     session_manager = SessionManager()
     mq_bridge = MQBridge()
     ocpp_handler = OCPPHandler(session_manager, mq_bridge)
+    # Attach to app.state for router access
+    app.state.ocpp_handler = ocpp_handler
     
     # Start background tasks
     asyncio.create_task(mq_bridge.start())
@@ -107,10 +109,10 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
 
 # Include routers
 app.include_router(health.router, prefix="/api", tags=["Health"])
-app.include_router(chargers.router, prefix="/api", tags=["Chargers"], dependencies=[Depends(get_current_user)])
-app.include_router(ocpp_control.router, prefix="/api", tags=["OCPP Control"], dependencies=[Depends(get_current_user)])
-app.include_router(logs.router, prefix="/api", tags=["Logs"], dependencies=[Depends(get_current_user)])
-app.include_router(internal.router, prefix="/api", tags=["Internal"], dependencies=[Depends(get_current_user)])
+app.include_router(chargers.router, prefix="/api", tags=["Chargers"])
+app.include_router(ocpp_control.router, prefix="/api", tags=["OCPP Control"])
+app.include_router(logs.router, prefix="/api", tags=["Logs"])
+app.include_router(internal.router, prefix="/api", tags=["Internal"])
 
 # WebSocket endpoint for OCPP chargers
 @app.websocket("/ocpp/{charger_id}")
