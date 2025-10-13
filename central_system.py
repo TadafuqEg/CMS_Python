@@ -45,18 +45,29 @@ class ClientManager:
             del self.clients[charge_point_id]
             logging.info(f"Client {charge_point_id} removed. Total clients: {len(self.clients)}")
     
-    def broadcast_to_all_clients(self, message):
+    async def broadcast_to_all_clients(self, message):
         """Broadcast a message to all connected clients"""
         if not self.clients:
             logging.warning("No clients connected to broadcast to")
             return False
         
         success_count = 0
+        tasks = []
+        
         for charge_point_id, client in self.clients.items():
             try:
-                # Send message to client
-                asyncio.create_task(client.send(message))
-                success_count += 1
+                # Create task for sending message to client
+                task = asyncio.create_task(client.send(message))
+                tasks.append((charge_point_id, task))
+            except Exception as e:
+                logging.error(f"Failed to create send task for {charge_point_id}: {e}")
+        
+        # Wait for all send operations to complete
+        for charge_point_id, task in tasks:
+            try:
+                success = await task
+                if success:
+                    success_count += 1
             except Exception as e:
                 logging.error(f"Failed to send message to {charge_point_id}: {e}")
         
@@ -73,7 +84,7 @@ class ClientManager:
                 logging.info(f"Master socket received: {message}")
                 
                 # Broadcast to all clients
-                success = self.broadcast_to_all_clients(message)
+                success = await self.broadcast_to_all_clients(message)
                 
                 # Send feedback to master
                 if success:
@@ -102,6 +113,20 @@ class CentralSystem(cp):
         # Register this client with the global manager
         client_manager.add_client(charge_point_id, self)
         
+    async def send(self, message):
+        """Send a message to the charge point"""
+        try:
+            if hasattr(self.websocket, 'send'):
+                await self.websocket.send(message)
+                logging.info(f"Sent message to {self.charge_point_id}: {message}")
+                return True
+            else:
+                logging.error(f"Cannot send message to {self.charge_point_id}: websocket has no send method")
+                return False
+        except Exception as e:
+            logging.error(f"Failed to send message to {self.charge_point_id}: {e}")
+            return False
+
     async def start(self):
         """Override start method to handle cleanup and malformed messages"""
         try:
