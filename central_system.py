@@ -555,6 +555,16 @@ async def main():
         # Create an SSL context for WSS
         ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ssl_context.load_cert_chain(certfile="cert.pem", keyfile="key.pem")  # Update paths if needed
+        
+        # Configure cipher suites to support TLS-ECDHE-RSA-WITH-AES-128-CBC-SHA
+        ssl_context.set_ciphers('ECDHE-RSA-AES128-SHA:ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM:DHE+CHACHA20:!aNULL:!MD5:!DSS')
+        
+        # Set minimum TLS version to ensure compatibility
+        ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
+        
+        # Log the configured cipher suites
+        logging.info(f"SSL Context configured with cipher suites: {ssl_context.get_ciphers()}")
+        logging.info(f"Minimum TLS version: {ssl_context.minimum_version}")
 
         # Start server with both client and master connection handlers
         async with websockets.serve(
