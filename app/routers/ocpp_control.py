@@ -31,6 +31,28 @@ class StopChargingRequest(BaseModel):
     charger_id: str
     transaction_id: int
 
+# Stats response models
+class ConnectionStats(BaseModel):
+    charger_id: str
+    is_connected: bool
+    connection_time: Optional[datetime] = None
+    last_heartbeat: Optional[datetime] = None
+    status: Optional[str] = None
+    vendor: Optional[str] = None
+    model: Optional[str] = None
+    firmware_version: Optional[str] = None
+
+class OCPPStats(BaseModel):
+    messages_sent: int
+    messages_received: int
+    messages_failed: int
+    connections_total: int
+    connections_active: int
+    active_connections: int
+    master_connections: int
+    pending_messages: int
+    active_chargers: List[ConnectionStats]
+
 
 @router.post("/charging/start", include_in_schema=True)
 async def start_charging(request: Request, body: StartChargingRequest):
@@ -565,6 +587,147 @@ async def charging_remote_stop(request: Request, body: RemoteStopBody, db: Sessi
     if not success:
         raise HTTPException(status_code=500, detail="Failed to send RemoteStopTransaction")
     return {"status": "sent", "message_id": message_id}
+
+
+# --- Stats and monitoring endpoints ---
+
+@router.get("/stats", response_model=OCPPStats, include_in_schema=True)
+async def get_ocpp_stats(request: Request, db: Session = Depends(get_db)):
+    """
+    Get comprehensive OCPP handler statistics including all active connections.
+    """
+    ocpp_handler = getattr(request.app.state, "ocpp_handler", None)
+    if not ocpp_handler:
+        raise HTTPException(status_code=500, detail="OCPP handler not available")
+    
+    # Get basic stats from handler
+    basic_stats = ocpp_handler.get_stats()
+    
+    # Get detailed charger information from database
+    active_chargers = []
+    for charger_id in ocpp_handler.charger_connections.keys():
+        charger = db.query(Charger).filter(Charger.id == charger_id).first()
+        if charger:
+            active_chargers.append(ConnectionStats(
+                charger_id=charger.id,
+                is_connected=charger.is_connected,
+                connection_time=charger.connection_time,
+                last_heartbeat=charger.last_heartbeat,
+                status=charger.status,
+                vendor=charger.vendor,
+                model=charger.model,
+                firmware_version=charger.firmware_version
+            ))
+        else:
+            # Charger is connected but not in database
+            active_chargers.append(ConnectionStats(
+                charger_id=charger_id,
+                is_connected=True,
+                status="Connected"
+            ))
+    
+    return OCPPStats(
+        messages_sent=basic_stats.get("messages_sent", 0),
+        messages_received=basic_stats.get("messages_received", 0),
+        messages_failed=basic_stats.get("messages_failed", 0),
+        connections_total=basic_stats.get("connections_total", 0),
+        connections_active=basic_stats.get("connections_active", 0),
+        active_connections=basic_stats.get("active_connections", 0),
+        master_connections=basic_stats.get("master_connections", 0),
+        pending_messages=basic_stats.get("pending_messages", 0),
+        active_chargers=active_chargers
+    )
+
+
+@router.get("/connections", response_model=List[ConnectionStats], include_in_schema=True)
+async def get_active_connections(request: Request, db: Session = Depends(get_db)):
+    """
+    Get detailed information about all active charger connections.
+    """
+    ocpp_handler = getattr(request.app.state, "ocpp_handler", None)
+    if not ocpp_handler:
+        raise HTTPException(status_code=500, detail="OCPP handler not available")
+    
+    active_connections = []
+    for charger_id in ocpp_handler.charger_connections.keys():
+        charger = db.query(Charger).filter(Charger.id == charger_id).first()
+        if charger:
+            active_connections.append(ConnectionStats(
+                charger_id=charger.id,
+                is_connected=charger.is_connected,
+                connection_time=charger.connection_time,
+                last_heartbeat=charger.last_heartbeat,
+                status=charger.status,
+                vendor=charger.vendor,
+                model=charger.model,
+                firmware_version=charger.firmware_version
+            ))
+        else:
+            # Charger is connected but not in database
+            active_connections.append(ConnectionStats(
+                charger_id=charger_id,
+                is_connected=True,
+                status="Connected"
+            ))
+    
+    return active_connections
+
+
+@router.get("/connections/{charger_id}", response_model=ConnectionStats, include_in_schema=True)
+async def get_charger_connection(charger_id: str, request: Request, db: Session = Depends(get_db)):
+    """
+    Get detailed information about a specific charger connection.
+    """
+    ocpp_handler = getattr(request.app.state, "ocpp_handler", None)
+    if not ocpp_handler:
+        raise HTTPException(status_code=500, detail="OCPP handler not available")
+    
+    # Check if charger is connected
+    if charger_id not in ocpp_handler.charger_connections:
+        raise HTTPException(status_code=404, detail=f"Charger {charger_id} not connected")
+    
+    # Get charger information from database
+    charger = db.query(Charger).filter(Charger.id == charger_id).first()
+    if charger:
+        return ConnectionStats(
+            charger_id=charger.id,
+            is_connected=charger.is_connected,
+            connection_time=charger.connection_time,
+            last_heartbeat=charger.last_heartbeat,
+            status=charger.status,
+            vendor=charger.vendor,
+            model=charger.model,
+            firmware_version=charger.firmware_version
+        )
+    else:
+        # Charger is connected but not in database
+        return ConnectionStats(
+            charger_id=charger_id,
+            is_connected=True,
+            status="Connected"
+        )
+
+
+@router.get("/stats/summary", include_in_schema=True)
+async def get_stats_summary(request: Request):
+    """
+    Get a quick summary of OCPP handler statistics.
+    """
+    ocpp_handler = getattr(request.app.state, "ocpp_handler", None)
+    if not ocpp_handler:
+        raise HTTPException(status_code=500, detail="OCPP handler not available")
+    
+    stats = ocpp_handler.get_stats()
+    return {
+        "total_connections": stats.get("connections_total", 0),
+        "active_connections": stats.get("active_connections", 0),
+        "master_connections": stats.get("master_connections", 0),
+        "messages_sent": stats.get("messages_sent", 0),
+        "messages_received": stats.get("messages_received", 0),
+        "messages_failed": stats.get("messages_failed", 0),
+        "pending_messages": stats.get("pending_messages", 0),
+        "connected_charger_ids": list(ocpp_handler.charger_connections.keys())
+    }
 
 # Make sure your router is included with the correct prefix in app.main.py:
 # app.include_router(ocpp_control.router, prefix="/api", tags=["OCPP Control"])
