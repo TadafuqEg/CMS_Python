@@ -118,11 +118,19 @@ app.include_router(internal.router, prefix="/api", tags=["Internal"])
 @app.websocket("/ocpp/{charger_id}")
 async def websocket_ocpp_endpoint(websocket: WebSocket, charger_id: str):
     """WebSocket endpoint for OCPP charger connections"""
-    if not ocpp_handler:
-        await websocket.close(code=1011, reason="Service not ready")
-        return
-    
-    await ocpp_handler.handle_charger_connection(websocket, charger_id)
+    try:
+        if not ocpp_handler:
+            await websocket.close(code=1011, reason="Service not ready")
+            return
+        
+        await websocket.accept()
+        await ocpp_handler.handle_charger_connection(websocket, charger_id)
+    except Exception as e:
+        logger.error(f"WebSocket error for charger {charger_id}: {e}")
+        try:
+            await websocket.close(code=1011, reason=f"Server error: {str(e)}")
+        except:
+            pass
 
 # WebSocket endpoint for master connections (broadcasting)
 @app.websocket("/master")
