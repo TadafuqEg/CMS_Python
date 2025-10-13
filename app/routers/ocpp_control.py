@@ -10,6 +10,9 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 import uuid
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 from app.models.database import get_db, Charger, Session as DBSession, ConnectionEvent
 from app.services.ocpp_handler import OCPPHandler
@@ -530,22 +533,54 @@ class RemoteStopBody(BaseModel):
 async def charging_remote_start(request: Request, body: RemoteStartBody, db: Session = Depends(get_db)):
     """
     Remotely start charging by sending RemoteStartTransaction to the charger via WebSocket.
+    Checks database for most recent connection event to verify charger is still connected.
     """
     ocpp_handler = getattr(request.app.state, "ocpp_handler", None)
     if not ocpp_handler or not hasattr(ocpp_handler, "charger_connections"):
         raise HTTPException(status_code=500, detail="OCPP handler not available")
+    
+    # Check database for most recent connection event for this charger
+    latest_connection_event = db.query(ConnectionEvent).filter(
+        ConnectionEvent.charger_id == body.charger_id
+    ).order_by(ConnectionEvent.timestamp.desc()).first()
+    
+    if not latest_connection_event:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Charger '{body.charger_id}' has never connected. Please ensure the charger connects via OCPP WebSocket first."
+        )
+    
+    # Check if the most recent event is a CONNECT event (charger is still connected)
+    if latest_connection_event.event_type != "CONNECT":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Charger '{body.charger_id}' is not currently connected. Last event was '{latest_connection_event.event_type}' at {latest_connection_event.timestamp}"
+        )
+    
+    # Double-check that charger is still in active connections
     connected_ids = list(ocpp_handler.charger_connections.keys())
-    if not connected_ids:
-        raise HTTPException(
-            status_code=404,
-            detail="No chargers are currently connected via WebSocket. Please ensure your OCPP client is connected to wss://localhost:9001/ocpp/{charger_id} before sending remote commands."
-        )
     if body.charger_id not in connected_ids:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Charger '{body.charger_id}' not connected. Connected charger_ids: {connected_ids}. Please connect your OCPP client to wss://localhost:9001/ocpp/{body.charger_id}"
+        # Update the connection event to DISCONNECT if it's not in active connections
+        disconnect_event = ConnectionEvent(
+            charger_id=body.charger_id,
+            event_type="DISCONNECT",
+            connection_id=latest_connection_event.connection_id,
+            reason="Connection lost - not in active connections",
+            session_duration=int((datetime.utcnow() - latest_connection_event.timestamp).total_seconds())
         )
-
+        db.add(disconnect_event)
+        db.commit()
+        
+        raise HTTPException(
+            status_code=400,
+            detail=f"Charger '{body.charger_id}' connection was lost. Please reconnect the charger via OCPP WebSocket."
+        )
+    
+    # Verify the connection_id matches (extra safety check)
+    if latest_connection_event.connection_id != ocpp_handler.connection_ids.get(body.charger_id):
+        logger.warning(f"Connection ID mismatch for charger {body.charger_id}. DB: {latest_connection_event.connection_id}, Active: {ocpp_handler.connection_ids.get(body.charger_id)}")
+    
+    # All checks passed - send remote start command
     message_id = str(uuid.uuid4())
     ocpp_message = [
         2,  # CALL
@@ -556,13 +591,25 @@ async def charging_remote_start(request: Request, body: RemoteStartBody, db: Ses
             "idTag": body.id_tag
         }
     ]
+    
     send_func = getattr(ocpp_handler, "send_message_to_charger", None)
     if not send_func:
         raise HTTPException(status_code=500, detail="OCPP handler missing send_message_to_charger")
+    
     success = await send_func(body.charger_id, ocpp_message)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to send RemoteStartTransaction")
-    return {"status": "sent", "message_id": message_id}
+    
+    # Log the remote start command
+    logger.info(f"Remote start command sent to charger {body.charger_id} with connection_id {latest_connection_event.connection_id}")
+    
+    return {
+        "status": "sent", 
+        "message_id": message_id,
+        "charger_id": body.charger_id,
+        "connection_id": latest_connection_event.connection_id,
+        "last_connection_time": latest_connection_event.timestamp.isoformat()
+    }
 
 @router.post("/charging/remote_stop")
 async def charging_remote_stop(request: Request, body: RemoteStopBody, db: Session = Depends(get_db)):
