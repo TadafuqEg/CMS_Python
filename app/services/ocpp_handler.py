@@ -43,6 +43,7 @@ class OCPPHandler:
         
         # Connection management
         self.charger_connections: Dict[str, WebSocketServerProtocol] = {}
+        self.connection_ids: Dict[str, str] = {}  # Store connection IDs for each charger
         self.master_connections: Set[WebSocketServerProtocol] = set()
         
         # Message queuing
@@ -151,7 +152,8 @@ class OCPPHandler:
             # Cleanup connection
             if websocket in self.charger_connections.values():
                 charger_id = next(k for k, v in self.charger_connections.items() if v == websocket)
-                await self.remove_charger_connection(charger_id)
+                connection_id = self.connection_ids.get(charger_id)
+                await self.remove_charger_connection(charger_id, connection_id)
             elif websocket in self.master_connections:
                 self.master_connections.discard(websocket)
     
@@ -164,6 +166,7 @@ class OCPPHandler:
         
         # Add connection
         self.charger_connections[charger_id] = websocket
+        self.connection_ids[charger_id] = connection_id  # Store connection ID
         self.stats["connections_total"] += 1
         self.stats["connections_active"] += 1
         
@@ -180,14 +183,8 @@ class OCPPHandler:
                 
         except websockets.exceptions.ConnectionClosed:
             logger.info(f"Charger {charger_id} disconnected")
-            # Log disconnect event
-            await self.log_connection_event(charger_id, "DISCONNECT", websocket, 
-                                          reason="Connection closed", connection_id=connection_id)
         except Exception as e:
             logger.error(f"Error handling charger {charger_id}: {e}")
-            # Log disconnect event with error
-            await self.log_connection_event(charger_id, "DISCONNECT", websocket, 
-                                          reason=f"Error: {str(e)}", connection_id=connection_id)
         finally:
             await self.remove_charger_connection(charger_id, connection_id)
     
@@ -556,6 +553,20 @@ class OCPPHandler:
             del self.charger_connections[charger_id]
             self.stats["connections_active"] -= 1
         
+        # Clean up connection ID
+        if charger_id in self.connection_ids:
+            stored_connection_id = self.connection_ids[charger_id]
+            del self.connection_ids[charger_id]
+            # Use stored connection_id if none provided
+            if connection_id is None:
+                connection_id = stored_connection_id
+        
+        # Log disconnect event if we have a connection_id
+        if connection_id:
+            await self.log_connection_event(charger_id, "DISCONNECT", 
+                                          reason="Connection removed", 
+                                          connection_id=connection_id)
+        
         # Update charger status in database
         await self.update_charger_connection_status(charger_id, False)
         
@@ -740,8 +751,8 @@ class OCPPHandler:
                         
                         # Remove from active connections
                         if charger.id in self.charger_connections:
-                            del self.charger_connections[charger.id]
-                            self.stats["connections_active"] -= 1
+                            connection_id = self.connection_ids.get(charger.id)
+                            await self.remove_charger_connection(charger.id, connection_id)
                     
                     if stale_chargers:
                         db.commit()
