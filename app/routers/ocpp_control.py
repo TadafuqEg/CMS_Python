@@ -1,7 +1,7 @@
 """
 OCPP control endpoints for remote operations
 """
-from pydantic import BaseModel, validator, Field
+from pydantic import BaseModel, validator, Field, constr
 import uuid
 from datetime import datetime
 from typing import Dict, Any, List, Optional
@@ -245,6 +245,38 @@ class OCPPResponse(BaseModel):
 
 class GetLocalListVersionRequest(BaseModel):
     charger_id: str    
+
+class IdTagInfo(BaseModel):
+    status: Literal["Accepted", "Blocked", "Expired", "Invalid", "ConcurrentTx"] = Field(..., description="Authorization status")
+    expiry_date: Optional[datetime] = Field(None, description="ISO 8601 expiry date")
+    parent_id_tag: Optional[constr(max_length=20)] = Field(None, description="Parent ID tag (max 20 chars)") # type: ignore
+
+    @validator('expiry_date')
+    def validate_expiry_date(cls, v):
+        if v is not None:
+            return v.replace(tzinfo=None)  # OCPP 1.6 expects no timezone
+        return v
+
+class AuthorizationEntry(BaseModel):
+    id_tag: constr(max_length=20) = Field(..., description="ID tag (max 20 chars)") # type: ignore
+    id_tag_info: Optional[IdTagInfo] = Field(None, description="Optional ID tag info")
+
+    @validator('id_tag')
+    def validate_id_tag(cls, v):
+        if not v or len(v.strip()) == 0:
+            raise ValueError("ID tag must not be empty")
+        return v.strip()
+
+class SendLocalListRequest(BaseModel):
+    charger_id: str
+    list_version: int = Field(..., gt=0, description="Local authorization list version")
+    update_type: Literal["Differential", "Full"] = Field(..., description="Update type (Differential or Full)")
+    local_authorization_list: List[AuthorizationEntry] = Field(default_factory=list, description="List of authorization entries")
+
+    @validator('local_authorization_list', each_item=True)
+    def validate_authorization_entry(cls, v):
+        return v
+
 
 @router.post("/ocpp/remote/start", response_model=OCPPResponse)
 async def remote_start_transaction(
@@ -921,6 +953,91 @@ async def charging_remote_stop(request: Request, body: RemoteStopBody, db: Sessi
         raise HTTPException(status_code=500, detail="Failed to send RemoteStopTransaction")
     return {"status": "sent", "message_id": message_id}
 
+@router.post("/ocpp/local_list/send", response_model=OCPPResponse)
+async def send_local_list(
+    request: Request,
+    send_list_request: SendLocalListRequest,
+    db: Session = Depends(get_db)
+):
+    """Send local authorization list to a charger (OCPP SendLocalList)"""
+    ocpp_handler = getattr(request.app.state, "ocpp_handler", None)
+    if not ocpp_handler:
+        raise HTTPException(status_code=500, detail="OCPP handler not available")
+
+    charger_id = send_list_request.charger_id
+    list_version = send_list_request.list_version
+    update_type = send_list_request.update_type
+    local_authorization_list = send_list_request.local_authorization_list
+
+    # Robust connection check
+    latest_connection_event = db.query(ConnectionEvent).filter(
+        ConnectionEvent.charger_id == charger_id
+    ).order_by(ConnectionEvent.timestamp.desc()).first()
+
+    if not latest_connection_event:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Charger '{charger_id}' has never connected."
+        )
+
+    if latest_connection_event.event_type != "CONNECT":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Charger '{charger_id}' is not currently connected. Last event: '{latest_connection_event.event_type}'"
+        )
+
+    connected_ids = list(ocpp_handler.charger_connections.keys())
+    if charger_id not in connected_ids:
+        disconnect_event = ConnectionEvent(
+            charger_id=charger_id,
+            event_type="DISCONNECT",
+            connection_id=latest_connection_event.connection_id,
+            reason="Connection lost during command",
+            session_duration=int((datetime.utcnow() - latest_connection_event.timestamp).total_seconds())
+        )
+        db.add(disconnect_event)
+        db.commit()
+        raise HTTPException(
+            status_code=400,
+            detail=f"Charger '{charger_id}' connection lost."
+        )
+
+    # Construct OCPP message
+    message_id = str(uuid.uuid4())
+    ocpp_payload = {
+        "listVersion": list_version,
+        "updateType": update_type,
+        "localAuthorizationList": [
+            {
+                "idTag": entry.id_tag,
+                **({"idTagInfo": {
+                    "status": entry.id_tag_info.status,
+                    **({"expiryDate": entry.id_tag_info.expiry_date.isoformat()} if entry.id_tag_info.expiry_date else {}),
+                    **({"parentIdTag": entry.id_tag_info.parent_id_tag} if entry.id_tag_info.parent_id_tag else {})
+                }} if entry.id_tag_info else {})
+            } for entry in local_authorization_list
+        ]
+    }
+    ocpp_message = [2, message_id, "SendLocalList", ocpp_payload]
+
+    # Send via OCPPHandler (automatically adds to pending_messages)
+    success = await ocpp_handler.send_message_to_charger(charger_id, ocpp_message)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to send SendLocalList command")
+
+    # Log outgoing request immediately
+    await ocpp_handler.log_message(
+        charger_id, "OUT", "SendLocalList", message_id, "Pending",
+        None, json.dumps(ocpp_message), None
+    )
+
+    logger.info(f"SendLocalList sent to {charger_id}: version={list_version}, updateType={update_type} (message_id={message_id})")
+
+    return OCPPResponse(
+        status="Accepted",
+        message_id=message_id,
+        message=f"SendLocalList command sent to charger {charger_id} with version {list_version}"
+    )
 
 @router.post("/ocpp/cache/clear", response_model=OCPPResponse)
 async def clear_cache(

@@ -270,6 +270,7 @@ class OCPPHandler:
         if self.session_manager:
             await self.session_manager.handle_ocpp_message(charger_id, action, payload, response)
     
+
     async def handle_call_result(self, charger_id: str, message_data: list, start_time: float):
         """Handle call result from charger"""
         message_id = message_data[1]
@@ -525,6 +526,40 @@ class OCPPHandler:
                     logger.error(f"Charger {charger_id} not found for GetLocalListVersion")
             except Exception as e:
                 logger.error(f"Failed to process GetLocalListVersion response for {charger_id}: {e}")
+            finally:
+                db.close()
+
+        # Handle SendLocalList
+        if pending_msg.action == "SendLocalList":
+            status = payload.get("status")
+            list_version = pending_msg.payload.get("listVersion")
+            update_type = pending_msg.payload.get("updateType")
+            db = SessionLocal()
+            try:
+                charger = db.query(Charger).filter(Charger.id == charger_id).first()
+                if charger:
+                    if status == "Accepted":
+                        old_version = charger.local_list_version
+                        charger.local_list_version = list_version
+                        db.commit()
+                        logger.info(f"Local authorization list for {charger_id} updated to version {list_version} (was {old_version}) with {update_type} update")
+                        if self.mq_bridge:
+                            await self.mq_bridge.send_event(
+                                "local_list_updated",
+                                charger_id,
+                                {
+                                    "list_version": list_version,
+                                    "old_version": old_version,
+                                    "update_type": update_type,
+                                    "timestamp": datetime.utcnow().isoformat()
+                                }
+                            )
+                    else:
+                        logger.warning(f"SendLocalList {status} for {charger_id}, version {list_version}, updateType {update_type}")
+                else:
+                    logger.error(f"Charger {charger_id} not found for SendLocalList")
+            except Exception as e:
+                logger.error(f"Failed to process SendLocalList response for {charger_id}: {e}")
             finally:
                 db.close()
 

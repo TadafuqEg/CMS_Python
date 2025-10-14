@@ -239,6 +239,23 @@ class MQBridge:
             "timestamp": command_data.get("timestamp")
         })
     
+    async def send_local_list_updated(self, charger_id: str, list_data: Dict[str, Any]):
+        """Send local list updated event"""
+        await self.send_event("local_list_updated", charger_id, {
+            "list_version": list_data.get("list_version"),
+            "old_version": list_data.get("old_version"),
+            "update_type": list_data.get("update_type"),
+            "timestamp": list_data.get("timestamp")
+        })
+    
+    async def send_local_list_version_retrieved(self, charger_id: str, version_data: Dict[str, Any]):
+        """Send local list version retrieved event"""
+        await self.send_event("local_list_version_retrieved", charger_id, {
+            "list_version": version_data.get("list_version"),
+            "old_version": version_data.get("old_version"),
+            "timestamp": version_data.get("timestamp")
+        })
+    
     async def receive_command(self, command_data: Dict[str, Any]) -> Dict[str, Any]:
         """Receive command from Laravel CMS"""
         try:
