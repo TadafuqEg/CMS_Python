@@ -209,29 +209,42 @@ class OCPPHandler:
             self.master_connections.discard(websocket)
     
     async def handle_charger_message(self, charger_id: str, message: str):
-        """Handle incoming message from charger"""
+        """Handle incoming messages from charger"""
+        self.stats["messages_received"] += 1
         start_time = time.time()
-        
         try:
-            # Parse OCPP message
+            logger.debug(f"Raw message received from {charger_id}: {message}")  # Add raw message logging
             message_data = json.loads(message)
-            message_type = message_data[0]  # 2 = CALL, 3 = CALLRESULT, 4 = CALLERROR
-            
-            if message_type == 2:  # CALL (incoming request)
+            if not isinstance(message_data, list):
+                raise ValueError("Invalid OCPP message format: not a list")
+
+            message_type = message_data[0]
+            logger.info(f"Processing message type {message_type} from {charger_id}")
+
+            if message_type == 2:  # CALL
                 await self.handle_incoming_call(charger_id, message_data, start_time)
-            elif message_type == 3:  # CALLRESULT (response to our call)
+            elif message_type == 3:  # CALLRESULT
                 await self.handle_call_result(charger_id, message_data, start_time)
-            elif message_type == 4:  # CALLERROR (error response to our call)
+            elif message_type == 4:  # CALLERROR
                 await self.handle_call_error(charger_id, message_data, start_time)
-            
-            self.stats["messages_received"] += 1
-            
+            else:
+                logger.error(f"Unknown message type {message_type} from {charger_id}")
+                await self.log_message(
+                    charger_id, "IN", "Unknown", None, "Error",
+                    (time.time() - start_time) * 1000, message, None
+                )
         except json.JSONDecodeError as e:
             logger.error(f"Invalid JSON from {charger_id}: {e}")
-            await self.log_message(charger_id, "IN", "InvalidJSON", None, "Error", None, message)
+            await self.log_message(
+                charger_id, "IN", "Invalid", None, "Error",
+                (time.time() - start_time) * 1000, message, None
+            )
         except Exception as e:
             logger.error(f"Error processing message from {charger_id}: {e}")
-            self.stats["messages_failed"] += 1
+            await self.log_message(
+                charger_id, "IN", "Error", None, "Error",
+                (time.time() - start_time) * 1000, message, None
+            )
     
     async def handle_incoming_call(self, charger_id: str, message_data: list, start_time: float):
         """Handle incoming OCPP call from charger"""
@@ -275,7 +288,7 @@ class OCPPHandler:
 
         logger.info(f"Received response for {pending_msg.action} from {charger_id}: {payload}")
 
-        # Handle ChangeConfiguration (from previous implementation)
+        # Handle ChangeConfiguration
         if pending_msg.action == "ChangeConfiguration":
             status = payload.get("status")
             db = SessionLocal()
@@ -318,6 +331,64 @@ class OCPPHandler:
                     )
             else:
                 logger.warning(f"ClearCache rejected for {charger_id}")
+
+        # Handle ChangeAvailability
+        if pending_msg.action == "ChangeAvailability":
+            status = payload.get("status")
+            connector_id = pending_msg.payload.get("connectorId")
+            availability_type = pending_msg.payload.get("type")
+            db = SessionLocal()
+            try:
+                if status == "Accepted":
+                    if connector_id == 0:
+                        # Update Charger status
+                        charger = db.query(Charger).filter(Charger.id == charger_id).first()
+                        if charger:
+                            old_status = charger.status
+                            charger.status = availability_type
+                            db.commit()
+                            logger.info(f"Charger {charger_id} availability changed to {availability_type} (was {old_status})")
+                            if self.mq_bridge:
+                                await self.mq_bridge.send_event(
+                                    "availability_changed",
+                                    charger_id,
+                                    {
+                                        "connector_id": connector_id,
+                                        "type": availability_type,
+                                        "old_status": old_status
+                                    }
+                                )
+                        else:
+                            logger.error(f"Charger {charger_id} not found for availability update")
+                    else:
+                        # Update Connector status
+                        connector = db.query(Connector).filter(
+                            Connector.charger_id == charger_id,
+                            Connector.connector_id == connector_id
+                        ).first()
+                        if connector:
+                            old_status = connector.status
+                            connector.status = availability_type
+                            db.commit()
+                            logger.info(f"Connector {connector_id} on {charger_id} availability changed to {availability_type} (was {old_status})")
+                            if self.mq_bridge:
+                                await self.mq_bridge.send_event(
+                                    "availability_changed",
+                                    charger_id,
+                                    {
+                                        "connector_id": connector_id,
+                                        "type": availability_type,
+                                        "old_status": old_status
+                                    }
+                                )
+                        else:
+                            logger.error(f"Connector {connector_id} on {charger_id} not found for availability update")
+                else:
+                    logger.warning(f"ChangeAvailability {status} for {charger_id}, connector {connector_id}")
+            except Exception as e:
+                logger.error(f"Failed to update availability for {charger_id}, connector {connector_id}: {e}")
+            finally:
+                db.close()
 
         processing_time = (time.time() - start_time) * 1000
         await self.log_message(

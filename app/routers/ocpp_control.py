@@ -11,6 +11,8 @@ from pydantic import BaseModel
 import uuid
 import json
 import logging
+from typing import Literal
+from app.models.database import get_db, ConnectionEvent, Connector,SessionLocal
 
 logger = logging.getLogger(__name__)
 
@@ -178,8 +180,27 @@ class ClearCacheRequest(BaseModel):
 
 class ChangeAvailabilityRequest(BaseModel):
     charger_id: str
-    connector_id: int
-    type: str  # Inoperative or Operative
+    connector_id: int = Field(..., ge=0, description="Connector ID (0 for entire charger)")
+    type: Literal["Operative", "Inoperative"] = Field(..., description="Availability type")
+
+    @validator('connector_id')
+    def validate_connector_id(cls, v, values):
+        if v == 0:
+            return v  # Charger-level availability is valid
+        db = SessionLocal()
+        try:
+            charger_id = values.get('charger_id')
+            if not charger_id:
+                raise ValueError("Charger ID must be provided")
+            connector = db.query(Connector).filter(
+                Connector.charger_id == charger_id,
+                Connector.connector_id == v
+            ).first()
+            if not connector:
+                raise ValueError(f"Connector {v} does not exist for charger {charger_id}")
+            return v
+        finally:
+            db.close()
 
 class ResetRequest(BaseModel):
     charger_id: str
@@ -494,6 +515,79 @@ async def change_availability(
         status="Accepted",
         message_id=message_id,
         message=f"Availability change command sent successfully"
+    )
+
+
+@router.post("/ocpp/availability/change", response_model=OCPPResponse)
+async def change_availability(
+    request: Request,
+    change_availability: ChangeAvailabilityRequest,
+    db: Session = Depends(get_db)
+):
+    """Change the availability of a charger or connector (OCPP ChangeAvailability)"""
+    ocpp_handler = getattr(request.app.state, "ocpp_handler", None)
+    if not ocpp_handler:
+        raise HTTPException(status_code=500, detail="OCPP handler not available")
+
+    charger_id = change_availability.charger_id
+    connector_id = change_availability.connector_id
+    availability_type = change_availability.type
+
+    # Robust connection check
+    latest_connection_event = db.query(ConnectionEvent).filter(
+        ConnectionEvent.charger_id == charger_id
+    ).order_by(ConnectionEvent.timestamp.desc()).first()
+
+    if not latest_connection_event:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Charger '{charger_id}' has never connected."
+        )
+
+    if latest_connection_event.event_type != "CONNECT":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Charger '{charger_id}' is not currently connected. Last event: '{latest_connection_event.event_type}'"
+        )
+
+    connected_ids = list(ocpp_handler.charger_connections.keys())
+    if charger_id not in connected_ids:
+        disconnect_event = ConnectionEvent(
+            charger_id=charger_id,
+            event_type="DISCONNECT",
+            connection_id=latest_connection_event.connection_id,
+            reason="Connection lost during command",
+            session_duration=int((datetime.utcnow() - latest_connection_event.timestamp).total_seconds())
+        )
+        db.add(disconnect_event)
+        db.commit()
+        raise HTTPException(
+            status_code=400,
+            detail=f"Charger '{charger_id}' connection lost."
+        )
+
+    # Construct OCPP message
+    message_id = str(uuid.uuid4())
+    ocpp_payload = {"connectorId": connector_id, "type": availability_type}
+    ocpp_message = [2, message_id, "ChangeAvailability", ocpp_payload]
+
+    # Send via OCPPHandler (automatically adds to pending_messages)
+    success = await ocpp_handler.send_message_to_charger(charger_id, ocpp_message)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to send ChangeAvailability command")
+
+    # Log outgoing request immediately
+    await ocpp_handler.log_message(
+        charger_id, "OUT", "ChangeAvailability", message_id, "Pending",
+        None, json.dumps(ocpp_message), None
+    )
+
+    logger.info(f"ChangeAvailability sent to {charger_id}: connectorId={connector_id}, type={availability_type} (message_id={message_id})")
+
+    return OCPPResponse(
+        status="Accepted",
+        message_id=message_id,
+        message=f"ChangeAvailability command sent for connector {connector_id} to {availability_type}"
     )
 
 @router.post("/ocpp/reset", response_model=OCPPResponse)
