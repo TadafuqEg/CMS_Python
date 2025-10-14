@@ -172,6 +172,9 @@ class SetConfigurationRequest(BaseModel):
         if len(v.strip()) == 0:
             raise ValueError('Value must not be empty')
         return v.strip()
+    
+class ClearCacheRequest(BaseModel):
+    charger_id: str
 
 class ChangeAvailabilityRequest(BaseModel):
     charger_id: str
@@ -708,6 +711,75 @@ async def charging_remote_stop(request: Request, body: RemoteStopBody, db: Sessi
     return {"status": "sent", "message_id": message_id}
 
 
+@router.post("/ocpp/cache/clear", response_model=OCPPResponse)
+async def clear_cache(
+    request: Request,
+    clear_cache: ClearCacheRequest,
+    db: Session = Depends(get_db)
+):
+    """Clear the authorization cache on a charger (OCPP ClearCache)"""
+    ocpp_handler = getattr(request.app.state, "ocpp_handler", None)
+    if not ocpp_handler:
+        raise HTTPException(status_code=500, detail="OCPP handler not available")
+
+    charger_id = clear_cache.charger_id
+
+    # Robust connection check (from /charging/remote_start)
+    latest_connection_event = db.query(ConnectionEvent).filter(
+        ConnectionEvent.charger_id == charger_id
+    ).order_by(ConnectionEvent.timestamp.desc()).first()
+
+    if not latest_connection_event:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Charger '{charger_id}' has never connected."
+        )
+
+    if latest_connection_event.event_type != "CONNECT":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Charger '{charger_id}' is not currently connected. Last event: '{latest_connection_event.event_type}'"
+        )
+
+    connected_ids = list(ocpp_handler.charger_connections.keys())
+    if charger_id not in connected_ids:
+        disconnect_event = ConnectionEvent(
+            charger_id=charger_id,
+            event_type="DISCONNECT",
+            connection_id=latest_connection_event.connection_id,
+            reason="Connection lost during command",
+            session_duration=int((datetime.utcnow() - latest_connection_event.timestamp).total_seconds())
+        )
+        db.add(disconnect_event)
+        db.commit()
+        raise HTTPException(
+            status_code=400,
+            detail=f"Charger '{charger_id}' connection lost."
+        )
+
+    # Construct OCPP message
+    message_id = str(uuid.uuid4())
+    ocpp_payload = {}
+    ocpp_message = [2, message_id, "ClearCache", ocpp_payload]
+
+    # Send via OCPPHandler (automatically adds to pending_messages)
+    success = await ocpp_handler.send_message_to_charger(charger_id, ocpp_message)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to send ClearCache command")
+
+    # Log outgoing request immediately
+    await ocpp_handler.log_message(
+        charger_id, "OUT", "ClearCache", message_id, "Pending",
+        None, json.dumps(ocpp_message), None
+    )
+
+    logger.info(f"ClearCache sent to {charger_id} (message_id={message_id})")
+
+    return OCPPResponse(
+        status="Accepted",
+        message_id=message_id,
+        message="ClearCache command sent"
+    )
 # --- Stats and monitoring endpoints ---
 
 @router.get("/stats", response_model=OCPPStats, include_in_schema=True)

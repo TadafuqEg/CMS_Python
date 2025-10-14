@@ -62,7 +62,9 @@ class OCPPHandler:
             "messages_received": 0,
             "messages_failed": 0,
             "connections_total": 0,
-            "connections_active": 0
+            "connections_active": 0,
+            "master_connections": 0,
+            "pending_messages": 0
         }
     
     async def start_websocket_server(self):
@@ -260,13 +262,11 @@ class OCPPHandler:
         message_id = message_data[1]
         payload = message_data[2]
 
-        # Find pending message
         pending_msg = self.pending_messages.pop(message_id, None)
         if not pending_msg:
             logger.warning(f"No pending message found for result {message_id} from {charger_id}")
             return
 
-        # Execute callback if provided (not used for ChangeConfiguration, but extensible)
         if pending_msg.callback:
             try:
                 await pending_msg.callback(payload)
@@ -275,7 +275,7 @@ class OCPPHandler:
 
         logger.info(f"Received response for {pending_msg.action} from {charger_id}: {payload}")
 
-        # Special handling for ChangeConfiguration
+        # Handle ChangeConfiguration (from previous implementation)
         if pending_msg.action == "ChangeConfiguration":
             status = payload.get("status")
             db = SessionLocal()
@@ -283,7 +283,6 @@ class OCPPHandler:
                 charger = db.query(Charger).filter(Charger.id == charger_id).first()
                 if charger:
                     if status == "Accepted":
-                        # Update configuration in DB
                         key = pending_msg.payload.get("key")
                         value = pending_msg.payload.get("value")
                         charger.configuration = charger.configuration or {}
@@ -291,7 +290,6 @@ class OCPPHandler:
                         charger.configuration[key] = value
                         db.commit()
                         logger.info(f"Configuration updated for {charger_id}: {key} = '{value}' (was '{old_value}')")
-                        # Notify MQBridge for external systems
                         if self.mq_bridge:
                             await self.mq_bridge.send_event(
                                 "configuration_changed",
@@ -307,7 +305,20 @@ class OCPPHandler:
             finally:
                 db.close()
 
-        # Log the message
+        # Handle ClearCache
+        if pending_msg.action == "ClearCache":
+            status = payload.get("status")
+            logger.info(f"ClearCache {status} for {charger_id}")
+            if status == "Accepted":
+                if self.mq_bridge:
+                    await self.mq_bridge.send_event(
+                        "cache_cleared",
+                        charger_id,
+                        {"timestamp": datetime.utcnow().isoformat()}
+                    )
+            else:
+                logger.warning(f"ClearCache rejected for {charger_id}")
+
         processing_time = (time.time() - start_time) * 1000
         await self.log_message(
             charger_id, "OUT", pending_msg.action, message_id, "Success",
