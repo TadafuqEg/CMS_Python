@@ -243,6 +243,9 @@ class OCPPResponse(BaseModel):
     message: Optional[str] = None
     data: Optional[Dict[str, Any]] = None
 
+class GetLocalListVersionRequest(BaseModel):
+    charger_id: str    
+
 @router.post("/ocpp/remote/start", response_model=OCPPResponse)
 async def remote_start_transaction(
     request: Request,
@@ -1128,7 +1131,75 @@ async def get_stats_summary(request: Request):
         "connected_charger_ids": list(ocpp_handler.charger_connections.keys())
     }
 
+@router.post("/ocpp/local_list_version/get", response_model=OCPPResponse)
+async def get_local_list_version(
+    request: Request,
+    get_version_request: GetLocalListVersionRequest,
+    db: Session = Depends(get_db)
+):
+    """Get the local authorization list version from a charger (OCPP GetLocalListVersion)"""
+    ocpp_handler = getattr(request.app.state, "ocpp_handler", None)
+    if not ocpp_handler:
+        raise HTTPException(status_code=500, detail="OCPP handler not available")
 
+    charger_id = get_version_request.charger_id
+
+    # Robust connection check
+    latest_connection_event = db.query(ConnectionEvent).filter(
+        ConnectionEvent.charger_id == charger_id
+    ).order_by(ConnectionEvent.timestamp.desc()).first()
+
+    if not latest_connection_event:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Charger '{charger_id}' has never connected."
+        )
+
+    if latest_connection_event.event_type != "CONNECT":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Charger '{charger_id}' is not currently connected. Last event: '{latest_connection_event.event_type}'"
+        )
+
+    connected_ids = list(ocpp_handler.charger_connections.keys())
+    if charger_id not in connected_ids:
+        disconnect_event = ConnectionEvent(
+            charger_id=charger_id,
+            event_type="DISCONNECT",
+            connection_id=latest_connection_event.connection_id,
+            reason="Connection lost during command",
+            session_duration=int((datetime.utcnow() - latest_connection_event.timestamp).total_seconds())
+        )
+        db.add(disconnect_event)
+        db.commit()
+        raise HTTPException(
+            status_code=400,
+            detail=f"Charger '{charger_id}' connection lost."
+        )
+
+    # Construct OCPP message
+    message_id = str(uuid.uuid4())
+    ocpp_payload = {}
+    ocpp_message = [2, message_id, "GetLocalListVersion", ocpp_payload]
+
+    # Send via OCPPHandler (automatically adds to pending_messages)
+    success = await ocpp_handler.send_message_to_charger(charger_id, ocpp_message)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to send GetLocalListVersion command")
+
+    # Log outgoing request immediately
+    await ocpp_handler.log_message(
+        charger_id, "OUT", "GetLocalListVersion", message_id, "Pending",
+        None, json.dumps(ocpp_message), None
+    )
+
+    logger.info(f"GetLocalListVersion sent to {charger_id} (message_id={message_id})")
+
+    return OCPPResponse(
+        status="Accepted",
+        message_id=message_id,
+        message=f"GetLocalListVersion command sent to charger {charger_id}"
+    )
 # --- Connection Events endpoints ---
 
 @router.get("/connection-events", response_model=List[ConnectionEventResponse], include_in_schema=True)

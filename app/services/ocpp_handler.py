@@ -471,7 +471,6 @@ class OCPPHandler:
                 ).first()
                 if connector:
                     if status == "Unlocked":
-                        # Only update status to Available if not in a charging session
                         if connector.status not in ["Charging", "Occupied"]:
                             old_status = connector.status
                             connector.status = "Available"
@@ -498,12 +497,43 @@ class OCPPHandler:
             finally:
                 db.close()
 
+        # Handle GetLocalListVersion
+        if pending_msg.action == "GetLocalListVersion":
+            list_version = payload.get("listVersion")
+            db = SessionLocal()
+            try:
+                charger = db.query(Charger).filter(Charger.id == charger_id).first()
+                if charger:
+                    if list_version is not None:
+                        old_version = charger.local_list_version
+                        charger.local_list_version = list_version
+                        db.commit()
+                        logger.info(f"Local list version for {charger_id} updated to {list_version} (was {old_version})")
+                        if self.mq_bridge:
+                            await self.mq_bridge.send_event(
+                                "local_list_version_retrieved",
+                                charger_id,
+                                {
+                                    "list_version": list_version,
+                                    "old_version": old_version,
+                                    "timestamp": datetime.utcnow().isoformat()
+                                }
+                            )
+                    else:
+                        logger.warning(f"No listVersion in GetLocalListVersion response for {charger_id}")
+                else:
+                    logger.error(f"Charger {charger_id} not found for GetLocalListVersion")
+            except Exception as e:
+                logger.error(f"Failed to process GetLocalListVersion response for {charger_id}: {e}")
+            finally:
+                db.close()
+
         processing_time = (time.time() - start_time) * 1000
         await self.log_message(
             charger_id, "OUT", pending_msg.action, message_id, "Success",
             processing_time, None, json.dumps(message_data)
         )
-    
+        
     async def handle_call_error(self, charger_id: str, message_data: list, start_time: float):
         """Handle call error from charger"""
         message_id = message_data[1]
