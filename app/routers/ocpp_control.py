@@ -1,7 +1,7 @@
 """
 OCPP control endpoints for remote operations
 """
-
+from pydantic import BaseModel, validator, Field
 import uuid
 from datetime import datetime
 from typing import Dict, Any, List, Optional
@@ -14,6 +14,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+from app.core.security import require_permission
 from app.models.database import get_db, Charger, Session as DBSession, ConnectionEvent
 from app.services.ocpp_handler import OCPPHandler
 from app.services.session_manager import SessionManager
@@ -157,7 +158,20 @@ class GetConfigurationRequest(BaseModel):
 
 class SetConfigurationRequest(BaseModel):
     charger_id: str
-    configuration: Dict[str, str]
+    key: str = Field(..., max_length=50, description="Configuration key (max 50 chars)")
+    value: str = Field(..., max_length=500, description="Configuration value (max 500 chars)")
+
+    @validator('key')
+    def validate_key(cls, v):
+        if not v or len(v.strip()) == 0:
+            raise ValueError('Key must not be empty')
+        return v.strip()
+
+    @validator('value')
+    def validate_value(cls, v):
+        if len(v.strip()) == 0:
+            raise ValueError('Value must not be empty')
+        return v.strip()
 
 class ChangeAvailabilityRequest(BaseModel):
     charger_id: str
@@ -376,31 +390,76 @@ async def get_configuration(
         data={"configuration": configuration}
     )
 
+from fastapi import Request  # Add if not present
+
 @router.post("/ocpp/configuration/set", response_model=OCPPResponse)
 async def set_configuration(
-    request: SetConfigurationRequest,
-    background_tasks: BackgroundTasks,
+    request: Request,
+    set_config: SetConfigurationRequest,  # Uses NEW model
     db: Session = Depends(get_db)
 ):
-    """Update configuration parameters on a charger"""
-    
-    # Verify charger exists and is connected
-    charger = db.query(Charger).filter(Charger.id == request.charger_id).first()
-    if not charger:
-        raise HTTPException(status_code=404, detail="Charger not found")
-    
-    if not charger.is_connected:
-        raise HTTPException(status_code=400, detail="Charger is not connected")
-    
-    # Generate unique message ID
+    """Update configuration parameters on a charger (OCPP ChangeConfiguration)"""
+    ocpp_handler = getattr(request.app.state, "ocpp_handler", None)
+    if not ocpp_handler:
+        raise HTTPException(status_code=500, detail="OCPP handler not available")
+
+    charger_id = set_config.charger_id
+
+    # Robust connection check (from /charging/remote_start)
+    latest_connection_event = db.query(ConnectionEvent).filter(
+        ConnectionEvent.charger_id == charger_id
+    ).order_by(ConnectionEvent.timestamp.desc()).first()
+
+    if not latest_connection_event:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Charger '{charger_id}' has never connected."
+        )
+
+    if latest_connection_event.event_type != "CONNECT":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Charger '{charger_id}' is not currently connected. Last event: '{latest_connection_event.event_type}'"
+        )
+
+    connected_ids = list(ocpp_handler.charger_connections.keys())
+    if charger_id not in connected_ids:
+        disconnect_event = ConnectionEvent(
+            charger_id=charger_id,
+            event_type="DISCONNECT",
+            connection_id=latest_connection_event.connection_id,
+            reason="Connection lost during command",
+            session_duration=int((datetime.utcnow() - latest_connection_event.timestamp).total_seconds())
+        )
+        db.add(disconnect_event)
+        db.commit()
+        raise HTTPException(
+            status_code=400,
+            detail=f"Charger '{charger_id}' connection lost."
+        )
+
+    # Construct OCPP message
     message_id = str(uuid.uuid4())
-    
-    # TODO: Send ChangeConfiguration via WebSocket
-    
+    ocpp_payload = {"key": set_config.key, "value": set_config.value}
+    ocpp_message = [2, message_id, "ChangeConfiguration", ocpp_payload]
+
+    # Send via OCPPHandler (automatically adds to pending_messages)
+    success = await ocpp_handler.send_message_to_charger(charger_id, ocpp_message)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to send ChangeConfiguration command")
+
+    # Log outgoing request immediately
+    await ocpp_handler.log_message(
+        charger_id, "OUT", "ChangeConfiguration", message_id, "Pending",
+        None, json.dumps(ocpp_message), None
+    )
+
+    logger.info(f"ChangeConfiguration sent to {charger_id}: key='{set_config.key}', value='{set_config.value}' (message_id={message_id})")
+
     return OCPPResponse(
         status="Accepted",
         message_id=message_id,
-        message="Configuration update command sent successfully"
+        message=f"ChangeConfiguration command sent for key '{set_config.key}'"
     )
 
 @router.post("/ocpp/availability/change", response_model=OCPPResponse)

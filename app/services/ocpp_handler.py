@@ -259,24 +259,60 @@ class OCPPHandler:
         """Handle call result from charger"""
         message_id = message_data[1]
         payload = message_data[2]
-        
+
         # Find pending message
-        if message_id in self.pending_messages:
-            pending_msg = self.pending_messages[message_id]
-            del self.pending_messages[message_id]
-            
-            # Execute callback if provided
-            if pending_msg.callback:
-                try:
-                    await pending_msg.callback(payload)
-                except Exception as e:
-                    logger.error(f"Error in callback for {message_id}: {e}")
-            
-            logger.info(f"Received response for {pending_msg.action} from {charger_id}")
-        
+        pending_msg = self.pending_messages.pop(message_id, None)
+        if not pending_msg:
+            logger.warning(f"No pending message found for result {message_id} from {charger_id}")
+            return
+
+        # Execute callback if provided (not used for ChangeConfiguration, but extensible)
+        if pending_msg.callback:
+            try:
+                await pending_msg.callback(payload)
+            except Exception as e:
+                logger.error(f"Error in callback for {message_id}: {e}")
+
+        logger.info(f"Received response for {pending_msg.action} from {charger_id}: {payload}")
+
+        # Special handling for ChangeConfiguration
+        if pending_msg.action == "ChangeConfiguration":
+            status = payload.get("status")
+            db = SessionLocal()
+            try:
+                charger = db.query(Charger).filter(Charger.id == charger_id).first()
+                if charger:
+                    if status == "Accepted":
+                        # Update configuration in DB
+                        key = pending_msg.payload.get("key")
+                        value = pending_msg.payload.get("value")
+                        charger.configuration = charger.configuration or {}
+                        old_value = charger.configuration.get(key)
+                        charger.configuration[key] = value
+                        db.commit()
+                        logger.info(f"Configuration updated for {charger_id}: {key} = '{value}' (was '{old_value}')")
+                        # Notify MQBridge for external systems
+                        if self.mq_bridge:
+                            await self.mq_bridge.send_event(
+                                "configuration_changed",
+                                charger_id,
+                                {"key": key, "value": value, "old_value": old_value}
+                            )
+                    else:
+                        logger.warning(f"ChangeConfiguration {status} for {charger_id}: key={pending_msg.payload.get('key')}")
+                else:
+                    logger.error(f"Charger {charger_id} not found for configuration update")
+            except Exception as e:
+                logger.error(f"Failed to update configuration for {charger_id}: {e}")
+            finally:
+                db.close()
+
         # Log the message
         processing_time = (time.time() - start_time) * 1000
-        await self.log_message(charger_id, "OUT", "Response", message_id, "Success", processing_time, None, json.dumps(message_data))
+        await self.log_message(
+            charger_id, "OUT", pending_msg.action, message_id, "Success",
+            processing_time, None, json.dumps(message_data)
+        )
     
     async def handle_call_error(self, charger_id: str, message_data: list, start_time: float):
         """Handle call error from charger"""
@@ -284,17 +320,19 @@ class OCPPHandler:
         error_code = message_data[2]
         error_description = message_data[3]
         error_details = message_data[4] if len(message_data) > 4 else None
-        
-        # Find pending message
-        if message_id in self.pending_messages:
-            pending_msg = self.pending_messages[message_id]
-            del self.pending_messages[message_id]
-            
+
+        pending_msg = self.pending_messages.pop(message_id, None)
+        if pending_msg:
             logger.error(f"Received error for {pending_msg.action} from {charger_id}: {error_code} - {error_description}")
-        
+            if pending_msg.action == "ChangeConfiguration":
+                logger.warning(f"ChangeConfiguration failed for {charger_id}: {error_code} - {error_description} (details: {error_details})")
+
         # Log the message
         processing_time = (time.time() - start_time) * 1000
-        await self.log_message(charger_id, "OUT", "Error", message_id, "Error", processing_time, None, json.dumps(message_data))
+        await self.log_message(
+            charger_id, "OUT", "Error", message_id, "Error",
+            processing_time, None, json.dumps(message_data)
+        )
     
     async def process_ocpp_call(self, charger_id: str, action: str, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Process OCPP call and return response"""
@@ -503,18 +541,36 @@ class OCPPHandler:
         }
     
     async def send_message_to_charger(self, charger_id: str, message: list):
-        """Send message to specific charger"""
-        if charger_id in self.charger_connections:
-            websocket = self.charger_connections[charger_id]
-            try:
-                await websocket.send(json.dumps(message))
-                self.stats["messages_sent"] += 1
-                return True
-            except Exception as e:
-                logger.error(f"Failed to send message to {charger_id}: {e}")
-                return False
-        else:
+        """Send message to specific charger and track CALL messages"""
+        if charger_id not in self.charger_connections:
             logger.warning(f"Charger {charger_id} not connected")
+            return False
+
+        websocket = self.charger_connections[charger_id]
+        try:
+            # For CALL messages (type 2), add to pending_messages
+            if message[0] == 2:  # CALL
+                message_id = message[1]
+                action = message[2]
+                payload = message[3]
+                pending_msg = PendingMessage(
+                    message_id=message_id,
+                    charger_id=charger_id,
+                    action=action,
+                    payload=payload,
+                    timestamp=datetime.utcnow()
+                )
+                self.pending_messages[message_id] = pending_msg
+                logger.debug(f"Added pending message {message_id} ({action}) for {charger_id}")
+
+            await websocket.send(json.dumps(message))
+            self.stats["messages_sent"] += 1
+            logger.debug(f"Sent message to {charger_id}: {action if message[0] == 2 else 'unknown'}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to send message to {charger_id}: {e}")
+            self.stats["messages_failed"] += 1
+            # Retry logic is handled in retry_pending_messages
             return False
     
     async def broadcast_to_chargers(self, message: str):
