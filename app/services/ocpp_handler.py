@@ -341,7 +341,6 @@ class OCPPHandler:
             try:
                 if status == "Accepted":
                     if connector_id == 0:
-                        # Update Charger status
                         charger = db.query(Charger).filter(Charger.id == charger_id).first()
                         if charger:
                             old_status = charger.status
@@ -361,7 +360,6 @@ class OCPPHandler:
                         else:
                             logger.error(f"Charger {charger_id} not found for availability update")
                     else:
-                        # Update Connector status
                         connector = db.query(Connector).filter(
                             Connector.charger_id == charger_id,
                             Connector.connector_id == connector_id
@@ -387,6 +385,43 @@ class OCPPHandler:
                     logger.warning(f"ChangeAvailability {status} for {charger_id}, connector {connector_id}")
             except Exception as e:
                 logger.error(f"Failed to update availability for {charger_id}, connector {connector_id}: {e}")
+            finally:
+                db.close()
+
+        # Handle GetConfiguration
+        if pending_msg.action == "GetConfiguration":
+            configuration_keys = payload.get("configurationKey", [])
+            unknown_keys = payload.get("unknownKey", [])
+            db = SessionLocal()
+            try:
+                charger = db.query(Charger).filter(Charger.id == charger_id).first()
+                if charger:
+                    if configuration_keys:
+                        # Update Charger.configuration with returned keys
+                        charger.configuration = charger.configuration or {}
+                        for config in configuration_keys:
+                            key = config.get("key")
+                            value = config.get("value")
+                            if key and value is not None:
+                                charger.configuration[key] = value
+                        db.commit()
+                        logger.info(f"Updated configuration for {charger_id}: {configuration_keys}")
+                    if unknown_keys:
+                        logger.warning(f"Unknown configuration keys for {charger_id}: {unknown_keys}")
+                    if self.mq_bridge:
+                        await self.mq_bridge.send_event(
+                            "configuration_retrieved",
+                            charger_id,
+                            {
+                                "configuration_keys": configuration_keys,
+                                "unknown_keys": unknown_keys,
+                                "requested_keys": pending_msg.payload.get("key", [])
+                            }
+                        )
+                else:
+                    logger.error(f"Charger {charger_id} not found for configuration update")
+            except Exception as e:
+                logger.error(f"Failed to process GetConfiguration response for {charger_id}: {e}")
             finally:
                 db.close()
 

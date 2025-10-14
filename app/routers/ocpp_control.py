@@ -156,7 +156,15 @@ class RebootRequest(BaseModel):
 
 class GetConfigurationRequest(BaseModel):
     charger_id: str
-    key: Optional[List[str]] = None
+    keys: Optional[List[str]] = Field(None, description="List of configuration keys to retrieve (optional)")
+
+    @validator('keys', each_item=True, pre=True)
+    def validate_keys(cls, v):
+        if not v or len(v.strip()) == 0:
+            raise ValueError("Configuration key must not be empty")
+        if len(v) > 50:
+            raise ValueError("Configuration key must not exceed 50 characters")
+        return v.strip()
 
 class SetConfigurationRequest(BaseModel):
     charger_id: str
@@ -381,37 +389,73 @@ async def reboot_charger(
 
 @router.post("/ocpp/configuration/get", response_model=OCPPResponse)
 async def get_configuration(
-    request: GetConfigurationRequest,
-    background_tasks: BackgroundTasks,
+    request: Request,
+    get_config: GetConfigurationRequest,
     db: Session = Depends(get_db)
 ):
-    """Retrieve charger configuration parameters"""
-    
-    # Verify charger exists and is connected
-    charger = db.query(Charger).filter(Charger.id == request.charger_id).first()
-    if not charger:
-        raise HTTPException(status_code=404, detail="Charger not found")
-    
-    if not charger.is_connected:
-        raise HTTPException(status_code=400, detail="Charger is not connected")
-    
-    # Generate unique message ID
+    """Get configuration parameters from a charger (OCPP GetConfiguration)"""
+    ocpp_handler = getattr(request.app.state, "ocpp_handler", None)
+    if not ocpp_handler:
+        raise HTTPException(status_code=500, detail="OCPP handler not available")
+
+    charger_id = get_config.charger_id
+    keys = get_config.keys
+
+    # Robust connection check
+    latest_connection_event = db.query(ConnectionEvent).filter(
+        ConnectionEvent.charger_id == charger_id
+    ).order_by(ConnectionEvent.timestamp.desc()).first()
+
+    if not latest_connection_event:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Charger '{charger_id}' has never connected."
+        )
+
+    if latest_connection_event.event_type != "CONNECT":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Charger '{charger_id}' is not currently connected. Last event: '{latest_connection_event.event_type}'"
+        )
+
+    connected_ids = list(ocpp_handler.charger_connections.keys())
+    if charger_id not in connected_ids:
+        disconnect_event = ConnectionEvent(
+            charger_id=charger_id,
+            event_type="DISCONNECT",
+            connection_id=latest_connection_event.connection_id,
+            reason="Connection lost during command",
+            session_duration=int((datetime.utcnow() - latest_connection_event.timestamp).total_seconds())
+        )
+        db.add(disconnect_event)
+        db.commit()
+        raise HTTPException(
+            status_code=400,
+            detail=f"Charger '{charger_id}' connection lost."
+        )
+
+    # Construct OCPP message
     message_id = str(uuid.uuid4())
-    
-    # TODO: Send GetConfiguration via WebSocket
-    # For now, return stored configuration
-    configuration = charger.configuration or {}
-    
-    if request.key:
-        # Filter by requested keys
-        filtered_config = {k: v for k, v in configuration.items() if k in request.key}
-        configuration = filtered_config
-    
+    ocpp_payload = {"key": keys} if keys else {}
+    ocpp_message = [2, message_id, "GetConfiguration", ocpp_payload]
+
+    # Send via OCPPHandler (automatically adds to pending_messages)
+    success = await ocpp_handler.send_message_to_charger(charger_id, ocpp_message)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to send GetConfiguration command")
+
+    # Log outgoing request immediately
+    await ocpp_handler.log_message(
+        charger_id, "OUT", "GetConfiguration", message_id, "Pending",
+        None, json.dumps(ocpp_message), None
+    )
+
+    logger.info(f"GetConfiguration sent to {charger_id}: keys={keys or 'all'} (message_id={message_id})")
+
     return OCPPResponse(
         status="Accepted",
         message_id=message_id,
-        message="Configuration retrieved successfully",
-        data={"configuration": configuration}
+        message=f"GetConfiguration command sent for keys {keys or 'all'}"
     )
 
 from fastapi import Request  # Add if not present
@@ -484,37 +528,6 @@ async def set_configuration(
         status="Accepted",
         message_id=message_id,
         message=f"ChangeConfiguration command sent for key '{set_config.key}'"
-    )
-
-@router.post("/ocpp/availability/change", response_model=OCPPResponse)
-async def change_availability(
-    request: ChangeAvailabilityRequest,
-    background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db)
-):
-    """Change availability of a connector"""
-    
-    # Verify charger exists and is connected
-    charger = db.query(Charger).filter(Charger.id == request.charger_id).first()
-    if not charger:
-        raise HTTPException(status_code=404, detail="Charger not found")
-    
-    if not charger.is_connected:
-        raise HTTPException(status_code=400, detail="Charger is not connected")
-    
-    # Validate availability type
-    if request.type not in ["Inoperative", "Operative"]:
-        raise HTTPException(status_code=400, detail="Invalid availability type. Must be 'Inoperative' or 'Operative'")
-    
-    # Generate unique message ID
-    message_id = str(uuid.uuid4())
-    
-    # TODO: Send ChangeAvailability via WebSocket
-    
-    return OCPPResponse(
-        status="Accepted",
-        message_id=message_id,
-        message=f"Availability change command sent successfully"
     )
 
 
