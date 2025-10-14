@@ -435,7 +435,6 @@ class OCPPHandler:
                     if status == "Accepted":
                         logger.info(f"Reset {reset_type} accepted for {charger_id}")
                         if reset_type == "Hard":
-                            # Update Charger status to Unavailable for Hard reset
                             old_status = charger.status
                             charger.status = "Unavailable"
                             charger.is_connected = False
@@ -457,6 +456,45 @@ class OCPPHandler:
                     logger.error(f"Charger {charger_id} not found for reset")
             except Exception as e:
                 logger.error(f"Failed to process Reset response for {charger_id}: {e}")
+            finally:
+                db.close()
+
+        # Handle UnlockConnector
+        if pending_msg.action == "UnlockConnector":
+            status = payload.get("status")
+            connector_id = pending_msg.payload.get("connectorId")
+            db = SessionLocal()
+            try:
+                connector = db.query(Connector).filter(
+                    Connector.charger_id == charger_id,
+                    Connector.connector_id == connector_id
+                ).first()
+                if connector:
+                    if status == "Unlocked":
+                        # Only update status to Available if not in a charging session
+                        if connector.status not in ["Charging", "Occupied"]:
+                            old_status = connector.status
+                            connector.status = "Available"
+                            db.commit()
+                            logger.info(f"Connector {connector_id} on {charger_id} unlocked, status set to Available (was {old_status})")
+                        else:
+                            logger.info(f"Connector {connector_id} on {charger_id} unlocked, but status remains {connector.status} due to active session")
+                        if self.mq_bridge:
+                            await self.mq_bridge.send_event(
+                                "unlock_triggered",
+                                charger_id,
+                                {
+                                    "connector_id": connector_id,
+                                    "status": status,
+                                    "timestamp": datetime.utcnow().isoformat()
+                                }
+                            )
+                    else:
+                        logger.warning(f"UnlockConnector {status} for {charger_id}, connector {connector_id}")
+                else:
+                    logger.error(f"Connector {connector_id} on {charger_id} not found for unlock")
+            except Exception as e:
+                logger.error(f"Failed to process UnlockConnector response for {charger_id}, connector {connector_id}: {e}")
             finally:
                 db.close()
 
