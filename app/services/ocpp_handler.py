@@ -14,8 +14,8 @@ from typing import Dict, Set, Optional, Any, List
 from dataclasses import dataclass
 
 import websockets
-from websockets.server import WebSocketServerProtocol
 from fastapi import WebSocket
+from websockets.server import WebSocketServerProtocol
 
 from app.models.database import SessionLocal, Charger, Connector, Session as DBSession, MessageLog, ConnectionEvent
 from app.core.config import settings
@@ -163,20 +163,30 @@ class OCPPHandler:
         """Handle charger WebSocket connection"""
         logger.info(f"Charger {charger_id} connecting...")
         
-        # Generate unique connection ID
-        connection_id = str(uuid.uuid4())
-        
-        # Add connection
-        self.charger_connections[charger_id] = websocket
-        self.connection_ids[charger_id] = connection_id  # Store connection ID
-        self.stats["connections_total"] += 1
-        self.stats["connections_active"] += 1
-        
-        # Update charger status in database
-        await self.update_charger_connection_status(charger_id, True)
-        
-        # Log connection event
-        await self.log_connection_event(charger_id, "CONNECT", websocket, connection_id=connection_id)
+        try:
+            # Generate unique connection ID
+            connection_id = str(uuid.uuid4())
+            
+            # Create charger record with default values if it doesn't exist
+            await self.create_or_update_charger_on_connect(charger_id, websocket)
+            
+            # Add connection
+            self.charger_connections[charger_id] = websocket
+            self.connection_ids[charger_id] = connection_id  # Store connection ID
+            self.stats["connections_total"] += 1
+            self.stats["connections_active"] += 1
+            
+            # Update charger status in database
+            await self.update_charger_connection_status(charger_id, True)
+            
+            # Log connection event
+            await self.log_connection_event(charger_id, "CONNECT", websocket, connection_id=connection_id)
+            
+            logger.info(f"Charger {charger_id} connected successfully")
+            
+        except Exception as e:
+            logger.error(f"Error in handle_charger_connection for {charger_id}: {e}")
+            raise
         
         try:
             # Handle messages from charger
@@ -613,26 +623,57 @@ class OCPPHandler:
             return None
     
     async def handle_boot_notification(self, charger_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Handle BootNotification"""
-        # Update charger information in database
+        """Handle BootNotification and save all WebSocket data"""
+        logger.info(f"Handling BootNotification for charger {charger_id} with payload: {payload}")
+        
+        # Update charger information in database with all BootNotification data
         db = SessionLocal()
         try:
             charger = db.query(Charger).filter(Charger.id == charger_id).first()
             if not charger:
+                logger.warning(f"Charger {charger_id} not found in database during BootNotification")
                 charger = Charger(id=charger_id)
                 db.add(charger)
             
-            charger.vendor = payload.get("chargePointVendor")
-            charger.model = payload.get("chargePointModel")
-            charger.serial_number = payload.get("chargePointSerialNumber")
-            charger.firmware_version = payload.get("firmwareVersion")
+            # Update charger with BootNotification data
+            charger.vendor = payload.get("chargePointVendor", charger.vendor)
+            charger.model = payload.get("chargePointModel", charger.model)
+            charger.serial_number = payload.get("chargePointSerialNumber", charger.serial_number)
+            charger.firmware_version = payload.get("firmwareVersion", charger.firmware_version)
             charger.status = "Available"
             charger.last_heartbeat = datetime.utcnow()
             charger.connection_time = datetime.utcnow()
             charger.is_connected = True
             
+            # Save all BootNotification payload data in configuration
+            if not charger.configuration:
+                charger.configuration = {}
+            
+            # Store all BootNotification data
+            charger.configuration.update({
+                "boot_notification_data": payload,
+                "boot_notification_received_at": datetime.utcnow().isoformat(),
+                "charge_point_vendor": payload.get("chargePointVendor"),
+                "charge_point_model": payload.get("chargePointModel"),
+                "charge_point_serial_number": payload.get("chargePointSerialNumber"),
+                "firmware_version": payload.get("firmwareVersion"),
+                "charge_box_serial_number": payload.get("chargeBoxSerialNumber"),
+                "meter_serial_number": payload.get("meterSerialNumber"),
+                "meter_type": payload.get("meterType"),
+                "last_boot_time": datetime.utcnow().isoformat()
+            })
+            
+            # Update charger metadata
+            charger.updated_at = datetime.utcnow()
+            
             db.commit()
             
+            logger.info(f"Updated charger {charger_id} with BootNotification data: vendor={charger.vendor}, model={charger.model}, firmware={charger.firmware_version}")
+            logger.info(f"Configuration updated with {len(charger.configuration)} fields")
+            
+        except Exception as e:
+            logger.error(f"Failed to update charger {charger_id} with BootNotification: {e}")
+            db.rollback()
         finally:
             db.close()
         
@@ -882,6 +923,80 @@ class OCPPHandler:
         await self.update_charger_connection_status(charger_id, False)
         
         logger.info(f"Charger {charger_id} removed. Active connections: {len(self.charger_connections)}")
+    
+    async def create_or_update_charger_on_connect(self, charger_id: str, websocket: WebSocketServerProtocol):
+        """Create charger record with default values when WebSocket connects"""
+        logger.info(f"Creating/updating charger {charger_id} on connect")
+        db = SessionLocal()
+        try:
+            charger = db.query(Charger).filter(Charger.id == charger_id).first()
+            logger.info(f"Charger {charger_id} exists: {charger is not None}")
+            
+            if not charger:
+                # Extract connection information from websocket
+                remote_address = None
+                user_agent = None
+                subprotocol = None
+                
+                try:
+                    remote_address = websocket.remote_address[0] if websocket.remote_address else None
+                    user_agent = websocket.request_headers.get('User-Agent')
+                    subprotocol = websocket.subprotocol
+                    logger.info(f"Extracted websocket info: remote={remote_address}, user_agent={user_agent}, subprotocol={subprotocol}")
+                except Exception as e:
+                    logger.warning(f"Could not extract websocket info: {e}")
+                
+                # Create new charger with default values
+                charger = Charger(
+                    id=charger_id,
+                    vendor="Unknown",
+                    model="Unknown",
+                    serial_number="Unknown",
+                    firmware_version="Unknown",
+                    status="Connecting",
+                    is_connected=True,
+                    connection_time=datetime.utcnow(),
+                    last_heartbeat=datetime.utcnow(),
+                    configuration={
+                        "remote_address": remote_address,
+                        "user_agent": user_agent,
+                        "subprotocol": subprotocol,
+                        "connection_source": "websocket"
+                    }
+                )
+                db.add(charger)
+                logger.info(f"Created new charger record for {charger_id} with default values")
+            else:
+                # Update existing charger connection info
+                charger.is_connected = True
+                charger.connection_time = datetime.utcnow()
+                charger.status = "Connecting"
+                charger.updated_at = datetime.utcnow()
+                
+                # Update configuration with connection info
+                if not charger.configuration:
+                    charger.configuration = {}
+                
+                try:
+                    charger.configuration.update({
+                        "remote_address": websocket.remote_address[0] if websocket.remote_address else None,
+                        "user_agent": websocket.request_headers.get('User-Agent'),
+                        "subprotocol": websocket.subprotocol,
+                        "last_connection_time": datetime.utcnow().isoformat()
+                    })
+                except Exception as e:
+                    logger.warning(f"Could not update charger configuration: {e}")
+                
+                logger.info(f"Updated existing charger record for {charger_id}")
+            
+            db.commit()
+            logger.info(f"Successfully committed charger {charger_id} to database")
+            
+        except Exception as e:
+            logger.error(f"Failed to create/update charger {charger_id}: {e}")
+            db.rollback()
+        finally:
+            db.close()
     
     async def update_charger_connection_status(self, charger_id: str, is_connected: bool):
         """Update charger connection status in database"""
