@@ -397,7 +397,6 @@ class OCPPHandler:
                 charger = db.query(Charger).filter(Charger.id == charger_id).first()
                 if charger:
                     if configuration_keys:
-                        # Update Charger.configuration with returned keys
                         charger.configuration = charger.configuration or {}
                         for config in configuration_keys:
                             key = config.get("key")
@@ -422,6 +421,42 @@ class OCPPHandler:
                     logger.error(f"Charger {charger_id} not found for configuration update")
             except Exception as e:
                 logger.error(f"Failed to process GetConfiguration response for {charger_id}: {e}")
+            finally:
+                db.close()
+
+        # Handle Reset
+        if pending_msg.action == "Reset":
+            status = payload.get("status")
+            reset_type = pending_msg.payload.get("type")
+            db = SessionLocal()
+            try:
+                charger = db.query(Charger).filter(Charger.id == charger_id).first()
+                if charger:
+                    if status == "Accepted":
+                        logger.info(f"Reset {reset_type} accepted for {charger_id}")
+                        if reset_type == "Hard":
+                            # Update Charger status to Unavailable for Hard reset
+                            old_status = charger.status
+                            charger.status = "Unavailable"
+                            charger.is_connected = False
+                            db.commit()
+                            logger.info(f"Charger {charger_id} status set to Unavailable due to Hard reset (was {old_status})")
+                        if self.mq_bridge:
+                            await self.mq_bridge.send_event(
+                                "reset_triggered",
+                                charger_id,
+                                {
+                                    "type": reset_type,
+                                    "status": status,
+                                    "timestamp": datetime.utcnow().isoformat()
+                                }
+                            )
+                    else:
+                        logger.warning(f"Reset {reset_type} {status} for {charger_id}")
+                else:
+                    logger.error(f"Charger {charger_id} not found for reset")
+            except Exception as e:
+                logger.error(f"Failed to process Reset response for {charger_id}: {e}")
             finally:
                 db.close()
 

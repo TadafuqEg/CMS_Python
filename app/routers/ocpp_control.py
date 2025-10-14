@@ -212,7 +212,7 @@ class ChangeAvailabilityRequest(BaseModel):
 
 class ResetRequest(BaseModel):
     charger_id: str
-    type: str = "Soft"  # Soft or Hard
+    type: Literal["Hard", "Soft"] = Field(..., description="Reset type (Hard or Soft)")
 
 class TriggerMessageRequest(BaseModel):
     charger_id: str
@@ -605,33 +605,73 @@ async def change_availability(
 
 @router.post("/ocpp/reset", response_model=OCPPResponse)
 async def reset_charger(
-    request: ResetRequest,
-    background_tasks: BackgroundTasks,
+    request: Request,
+    reset_request: ResetRequest,
     db: Session = Depends(get_db)
 ):
-    """Send reset command to a charger"""
-    
-    # Verify charger exists and is connected
-    charger = db.query(Charger).filter(Charger.id == request.charger_id).first()
-    if not charger:
-        raise HTTPException(status_code=404, detail="Charger not found")
-    
-    if not charger.is_connected:
-        raise HTTPException(status_code=400, detail="Charger is not connected")
-    
-    # Validate reset type
-    if request.type not in ["Soft", "Hard"]:
-        raise HTTPException(status_code=400, detail="Invalid reset type. Must be 'Soft' or 'Hard'")
-    
-    # Generate unique message ID
+    """Reset a charger (OCPP Reset)"""
+    ocpp_handler = getattr(request.app.state, "ocpp_handler", None)
+    if not ocpp_handler:
+        raise HTTPException(status_code=500, detail="OCPP handler not available")
+
+    charger_id = reset_request.charger_id
+    reset_type = reset_request.type
+
+    # Robust connection check
+    latest_connection_event = db.query(ConnectionEvent).filter(
+        ConnectionEvent.charger_id == charger_id
+    ).order_by(ConnectionEvent.timestamp.desc()).first()
+
+    if not latest_connection_event:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Charger '{charger_id}' has never connected."
+        )
+
+    if latest_connection_event.event_type != "CONNECT":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Charger '{charger_id}' is not currently connected. Last event: '{latest_connection_event.event_type}'"
+        )
+
+    connected_ids = list(ocpp_handler.charger_connections.keys())
+    if charger_id not in connected_ids:
+        disconnect_event = ConnectionEvent(
+            charger_id=charger_id,
+            event_type="DISCONNECT",
+            connection_id=latest_connection_event.connection_id,
+            reason="Connection lost during command",
+            session_duration=int((datetime.utcnow() - latest_connection_event.timestamp).total_seconds())
+        )
+        db.add(disconnect_event)
+        db.commit()
+        raise HTTPException(
+            status_code=400,
+            detail=f"Charger '{charger_id}' connection lost."
+        )
+
+    # Construct OCPP message
     message_id = str(uuid.uuid4())
-    
-    # TODO: Send Reset via WebSocket
-    
+    ocpp_payload = {"type": reset_type}
+    ocpp_message = [2, message_id, "Reset", ocpp_payload]
+
+    # Send via OCPPHandler (automatically adds to pending_messages)
+    success = await ocpp_handler.send_message_to_charger(charger_id, ocpp_message)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to send Reset command")
+
+    # Log outgoing request immediately
+    await ocpp_handler.log_message(
+        charger_id, "OUT", "Reset", message_id, "Pending",
+        None, json.dumps(ocpp_message), None
+    )
+
+    logger.info(f"Reset {reset_type} sent to {charger_id} (message_id={message_id})")
+
     return OCPPResponse(
         status="Accepted",
         message_id=message_id,
-        message=f"Reset command ({request.type}) sent successfully"
+        message=f"Reset command ({reset_type}) sent to charger {charger_id}"
     )
 
 @router.post("/ocpp/trigger", response_model=OCPPResponse)
