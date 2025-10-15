@@ -414,18 +414,11 @@ async def unlock_connector(
 
     connected_ids = list(ocpp_handler.charger_connections.keys())
     if charger_id not in connected_ids:
-        disconnect_event = ConnectionEvent(
-            charger_id=charger_id,
-            event_type="DISCONNECT",
-            connection_id=latest_connection_event.connection_id,
-            reason="Connection lost during command",
-            session_duration=int((datetime.utcnow() - latest_connection_event.timestamp).total_seconds())
-        )
-        db.add(disconnect_event)
-        db.commit()
+        # Don't create disconnect event - let OCPP handler manage connection state
+        logger.warning(f"Charger {charger_id} not found in active connections during unlock command")
         raise HTTPException(
             status_code=400,
-            detail=f"Charger '{charger_id}' connection lost."
+            detail=f"Charger '{charger_id}' is not currently connected. Please check connection status."
         )
 
     # Construct OCPP message
@@ -516,18 +509,11 @@ async def get_configuration(
 
     connected_ids = list(ocpp_handler.charger_connections.keys())
     if charger_id not in connected_ids:
-        disconnect_event = ConnectionEvent(
-            charger_id=charger_id,
-            event_type="DISCONNECT",
-            connection_id=latest_connection_event.connection_id,
-            reason="Connection lost during command",
-            session_duration=int((datetime.utcnow() - latest_connection_event.timestamp).total_seconds())
-        )
-        db.add(disconnect_event)
-        db.commit()
+        # Don't create disconnect event - let OCPP handler manage connection state
+        logger.warning(f"Charger {charger_id} not found in active connections during command")
         raise HTTPException(
             status_code=400,
-            detail=f"Charger '{charger_id}' connection lost."
+            detail=f"Charger '{charger_id}' is not currently connected. Please check connection status."
         )
 
     # Construct OCPP message
@@ -588,18 +574,11 @@ async def set_configuration(
 
     connected_ids = list(ocpp_handler.charger_connections.keys())
     if charger_id not in connected_ids:
-        disconnect_event = ConnectionEvent(
-            charger_id=charger_id,
-            event_type="DISCONNECT",
-            connection_id=latest_connection_event.connection_id,
-            reason="Connection lost during command",
-            session_duration=int((datetime.utcnow() - latest_connection_event.timestamp).total_seconds())
-        )
-        db.add(disconnect_event)
-        db.commit()
+        # Don't create disconnect event - let OCPP handler manage connection state
+        logger.warning(f"Charger {charger_id} not found in active connections during command")
         raise HTTPException(
             status_code=400,
-            detail=f"Charger '{charger_id}' connection lost."
+            detail=f"Charger '{charger_id}' is not currently connected. Please check connection status."
         )
 
     # Construct OCPP message
@@ -661,18 +640,11 @@ async def change_availability(
 
     connected_ids = list(ocpp_handler.charger_connections.keys())
     if charger_id not in connected_ids:
-        disconnect_event = ConnectionEvent(
-            charger_id=charger_id,
-            event_type="DISCONNECT",
-            connection_id=latest_connection_event.connection_id,
-            reason="Connection lost during command",
-            session_duration=int((datetime.utcnow() - latest_connection_event.timestamp).total_seconds())
-        )
-        db.add(disconnect_event)
-        db.commit()
+        # Don't create disconnect event - let OCPP handler manage connection state
+        logger.warning(f"Charger {charger_id} not found in active connections during availability change")
         raise HTTPException(
             status_code=400,
-            detail=f"Charger '{charger_id}' connection lost."
+            detail=f"Charger '{charger_id}' is not currently connected. Please check connection status."
         )
 
     # Construct OCPP message
@@ -732,18 +704,11 @@ async def reset_charger(
 
     connected_ids = list(ocpp_handler.charger_connections.keys())
     if charger_id not in connected_ids:
-        disconnect_event = ConnectionEvent(
-            charger_id=charger_id,
-            event_type="DISCONNECT",
-            connection_id=latest_connection_event.connection_id,
-            reason="Connection lost during command",
-            session_duration=int((datetime.utcnow() - latest_connection_event.timestamp).total_seconds())
-        )
-        db.add(disconnect_event)
-        db.commit()
+        # Don't create disconnect event - let OCPP handler manage connection state
+        logger.warning(f"Charger {charger_id} not found in active connections during reset command")
         raise HTTPException(
             status_code=400,
-            detail=f"Charger '{charger_id}' connection lost."
+            detail=f"Charger '{charger_id}' is not currently connected. Please check connection status."
         )
 
     # Construct OCPP message
@@ -865,20 +830,11 @@ async def charging_remote_start(request: Request, body: RemoteStartBody, db: Ses
     # Double-check that charger is still in active connections
     connected_ids = list(ocpp_handler.charger_connections.keys())
     if body.charger_id not in connected_ids:
-        # Update the connection event to DISCONNECT if it's not in active connections
-        disconnect_event = ConnectionEvent(
-            charger_id=body.charger_id,
-            event_type="DISCONNECT",
-            connection_id=latest_connection_event.connection_id,
-            reason="Connection lost - not in active connections",
-            session_duration=int((datetime.utcnow() - latest_connection_event.timestamp).total_seconds())
-        )
-        db.add(disconnect_event)
-        db.commit()
-        
+        # Don't create disconnect event - let OCPP handler manage connection state
+        logger.warning(f"Charger {body.charger_id} not found in active connections during remote start")
         raise HTTPException(
             status_code=400,
-            detail=f"Charger '{body.charger_id}' connection was lost. Please reconnect the charger via OCPP WebSocket."
+            detail=f"Charger '{body.charger_id}' is not currently connected. Please check connection status."
         )
     
     # Verify the connection_id matches (extra safety check)
@@ -988,18 +944,11 @@ async def send_local_list(
 
     connected_ids = list(ocpp_handler.charger_connections.keys())
     if charger_id not in connected_ids:
-        disconnect_event = ConnectionEvent(
-            charger_id=charger_id,
-            event_type="DISCONNECT",
-            connection_id=latest_connection_event.connection_id,
-            reason="Connection lost during command",
-            session_duration=int((datetime.utcnow() - latest_connection_event.timestamp).total_seconds())
-        )
-        db.add(disconnect_event)
-        db.commit()
+        # Don't create disconnect event - let OCPP handler manage connection state
+        logger.warning(f"Charger {charger_id} not found in active connections during command")
         raise HTTPException(
             status_code=400,
-            detail=f"Charger '{charger_id}' connection lost."
+            detail=f"Charger '{charger_id}' is not currently connected. Please check connection status."
         )
 
     # Construct OCPP message
@@ -1071,18 +1020,11 @@ async def clear_cache(
 
     connected_ids = list(ocpp_handler.charger_connections.keys())
     if charger_id not in connected_ids:
-        disconnect_event = ConnectionEvent(
-            charger_id=charger_id,
-            event_type="DISCONNECT",
-            connection_id=latest_connection_event.connection_id,
-            reason="Connection lost during command",
-            session_duration=int((datetime.utcnow() - latest_connection_event.timestamp).total_seconds())
-        )
-        db.add(disconnect_event)
-        db.commit()
+        # Don't create disconnect event - let OCPP handler manage connection state
+        logger.warning(f"Charger {charger_id} not found in active connections during command")
         raise HTTPException(
             status_code=400,
-            detail=f"Charger '{charger_id}' connection lost."
+            detail=f"Charger '{charger_id}' is not currently connected. Please check connection status."
         )
 
     # Construct OCPP message
@@ -1280,18 +1222,11 @@ async def get_local_list_version(
 
     connected_ids = list(ocpp_handler.charger_connections.keys())
     if charger_id not in connected_ids:
-        disconnect_event = ConnectionEvent(
-            charger_id=charger_id,
-            event_type="DISCONNECT",
-            connection_id=latest_connection_event.connection_id,
-            reason="Connection lost during command",
-            session_duration=int((datetime.utcnow() - latest_connection_event.timestamp).total_seconds())
-        )
-        db.add(disconnect_event)
-        db.commit()
+        # Don't create disconnect event - let OCPP handler manage connection state
+        logger.warning(f"Charger {charger_id} not found in active connections during command")
         raise HTTPException(
             status_code=400,
-            detail=f"Charger '{charger_id}' connection lost."
+            detail=f"Charger '{charger_id}' is not currently connected. Please check connection status."
         )
 
     # Construct OCPP message
