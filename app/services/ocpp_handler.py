@@ -1,4 +1,4 @@
-"""
+t"""
 Enhanced OCPP WebSocket handler with message queuing and retry mechanism
 """
 from datetime import timedelta
@@ -1281,7 +1281,7 @@ class OCPPHandler:
                         except Exception as e:
                             logger.error(f"Failed to commit heartbeat monitor changes: {e}")
                             db.rollback()
-                        
+                    
                 finally:
                     try:
                         db.close()
