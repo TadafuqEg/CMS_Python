@@ -12,7 +12,7 @@ import uuid
 import json
 import logging
 from typing import Literal
-from app.models.database import get_db, ConnectionEvent, Connector,SessionLocal
+from app.models.database import get_db, ConnectionEvent, Connector, SessionLocal, SystemConfig
 
 logger = logging.getLogger(__name__)
 
@@ -1327,6 +1327,202 @@ async def get_connection_event_stats(request: Request = None, db: Session = Depe
         raise HTTPException(status_code=500, detail=f"Failed to get connection event stats: {e}")
 
 # Make sure your router is included with the correct prefix in app.main.py:
+# Retry Configuration Models
+class RetryConfigRequest(BaseModel):
+    max_retries: int = Field(..., ge=1, le=10, description="Maximum number of retry attempts (1-10)")
+    retry_interval: int = Field(..., ge=1, le=60, description="Retry interval in seconds (1-60)")
+    retry_enabled: bool = Field(True, description="Enable/disable retry functionality")
+
+class RetryConfigResponse(BaseModel):
+    charger_id: str
+    max_retries: int
+    retry_interval: int
+    retry_enabled: bool
+    message: str
+
+class SystemRetryConfigRequest(BaseModel):
+    max_retries: int = Field(..., ge=1, le=10, description="Default maximum retry attempts (1-10)")
+    retry_interval: int = Field(..., ge=1, le=60, description="Default retry interval in seconds (1-60)")
+
+class SystemRetryConfigResponse(BaseModel):
+    max_retries: int
+    retry_interval: int
+    message: str
+
+# Retry Configuration Endpoints
+@router.post("/retry-config/{charger_id}", response_model=RetryConfigResponse)
+async def set_charger_retry_config(
+    charger_id: str,
+    config: RetryConfigRequest,
+    db: Session = Depends(get_db)
+):
+    """Set retry configuration for a specific charger"""
+    try:
+        charger = db.query(Charger).filter(Charger.id == charger_id).first()
+        if not charger:
+            raise HTTPException(status_code=404, detail=f"Charger '{charger_id}' not found")
+        
+        charger.max_retries = config.max_retries
+        charger.retry_interval = config.retry_interval
+        charger.retry_enabled = config.retry_enabled
+        charger.updated_at = datetime.utcnow()
+        
+        db.commit()
+        
+        logger.info(f"Updated retry config for charger {charger_id}: max_retries={config.max_retries}, retry_interval={config.retry_interval}s, retry_enabled={config.retry_enabled}")
+        
+        return RetryConfigResponse(
+            charger_id=charger_id,
+            max_retries=config.max_retries,
+            retry_interval=config.retry_interval,
+            retry_enabled=config.retry_enabled,
+            message=f"Retry configuration updated for charger {charger_id}"
+        )
+        
+    except Exception as e:
+        logger.error(f"Failed to update retry config for charger {charger_id}: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to update retry configuration: {str(e)}")
+
+@router.get("/retry-config/{charger_id}", response_model=RetryConfigResponse)
+async def get_charger_retry_config(
+    charger_id: str,
+    db: Session = Depends(get_db)
+):
+    """Get retry configuration for a specific charger"""
+    try:
+        charger = db.query(Charger).filter(Charger.id == charger_id).first()
+        if not charger:
+            raise HTTPException(status_code=404, detail=f"Charger '{charger_id}' not found")
+        
+        return RetryConfigResponse(
+            charger_id=charger_id,
+            max_retries=charger.max_retries or 3,
+            retry_interval=charger.retry_interval or 5,
+            retry_enabled=charger.retry_enabled if charger.retry_enabled is not None else True,
+            message=f"Retry configuration for charger {charger_id}"
+        )
+        
+    except Exception as e:
+        logger.error(f"Failed to get retry config for charger {charger_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get retry configuration: {str(e)}")
+
+@router.post("/retry-config/system", response_model=SystemRetryConfigResponse)
+async def set_system_retry_config(
+    config: SystemRetryConfigRequest,
+    db: Session = Depends(get_db)
+):
+    """Set default retry configuration for all chargers"""
+    try:
+        # Update or create max_retries config
+        max_retries_config = db.query(SystemConfig).filter(SystemConfig.key == "max_retries").first()
+        if max_retries_config:
+            max_retries_config.value = str(config.max_retries)
+            max_retries_config.updated_at = datetime.utcnow()
+        else:
+            max_retries_config = SystemConfig(
+                key="max_retries",
+                value=str(config.max_retries),
+                description="Default maximum retry attempts for failed messages"
+            )
+            db.add(max_retries_config)
+        
+        # Update or create retry_interval config
+        retry_interval_config = db.query(SystemConfig).filter(SystemConfig.key == "retry_interval").first()
+        if retry_interval_config:
+            retry_interval_config.value = str(config.retry_interval)
+            retry_interval_config.updated_at = datetime.utcnow()
+        else:
+            retry_interval_config = SystemConfig(
+                key="retry_interval",
+                value=str(config.retry_interval),
+                description="Default retry interval in seconds"
+            )
+            db.add(retry_interval_config)
+        
+        db.commit()
+        
+        logger.info(f"Updated system retry config: max_retries={config.max_retries}, retry_interval={config.retry_interval}s")
+        
+        return SystemRetryConfigResponse(
+            max_retries=config.max_retries,
+            retry_interval=config.retry_interval,
+            message="System retry configuration updated successfully"
+        )
+        
+    except Exception as e:
+        logger.error(f"Failed to update system retry config: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to update system retry configuration: {str(e)}")
+
+@router.get("/retry-config/system", response_model=SystemRetryConfigResponse)
+async def get_system_retry_config(
+    db: Session = Depends(get_db)
+):
+    """Get default retry configuration"""
+    try:
+        max_retries_config = db.query(SystemConfig).filter(SystemConfig.key == "max_retries").first()
+        retry_interval_config = db.query(SystemConfig).filter(SystemConfig.key == "retry_interval").first()
+        
+        return SystemRetryConfigResponse(
+            max_retries=int(max_retries_config.value) if max_retries_config else 3,
+            retry_interval=int(retry_interval_config.value) if retry_interval_config else 5,
+            message="System retry configuration"
+        )
+        
+    except Exception as e:
+        logger.error(f"Failed to get system retry config: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get system retry configuration: {str(e)}")
+
+# Simple retry enable/disable endpoint
+@router.post("/retry-config/{charger_id}/enable")
+async def enable_charger_retry(
+    charger_id: str,
+    db: Session = Depends(get_db)
+):
+    """Enable retry functionality for a specific charger"""
+    try:
+        charger = db.query(Charger).filter(Charger.id == charger_id).first()
+        if not charger:
+            raise HTTPException(status_code=404, detail=f"Charger '{charger_id}' not found")
+        
+        charger.retry_enabled = True
+        charger.updated_at = datetime.utcnow()
+        db.commit()
+        
+        logger.info(f"Enabled retry for charger {charger_id}")
+        
+        return {"charger_id": charger_id, "retry_enabled": True, "message": f"Retry enabled for charger {charger_id}"}
+        
+    except Exception as e:
+        logger.error(f"Failed to enable retry for charger {charger_id}: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to enable retry: {str(e)}")
+
+@router.post("/retry-config/{charger_id}/disable")
+async def disable_charger_retry(
+    charger_id: str,
+    db: Session = Depends(get_db)
+):
+    """Disable retry functionality for a specific charger"""
+    try:
+        charger = db.query(Charger).filter(Charger.id == charger_id).first()
+        if not charger:
+            raise HTTPException(status_code=404, detail=f"Charger '{charger_id}' not found")
+        
+        charger.retry_enabled = False
+        charger.updated_at = datetime.utcnow()
+        db.commit()
+        
+        logger.info(f"Disabled retry for charger {charger_id}")
+        
+        return {"charger_id": charger_id, "retry_enabled": False, "message": f"Retry disabled for charger {charger_id}"}
+        
+    except Exception as e:
+        logger.error(f"Failed to disable retry for charger {charger_id}: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to disable retry: {str(e)}")
+
 # app.include_router(ocpp_control.router, prefix="/api", tags=["OCPP Control"])
 
 # Also, ensure your endpoint is defined as:

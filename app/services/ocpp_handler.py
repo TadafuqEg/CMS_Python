@@ -1,4 +1,4 @@
-t"""
+"""
 Enhanced OCPP WebSocket handler with message queuing and retry mechanism
 """
 from datetime import timedelta
@@ -17,7 +17,7 @@ import websockets
 from fastapi import WebSocket
 from websockets.server import WebSocketServerProtocol
 
-from app.models.database import SessionLocal, Charger, Connector, Session as DBSession, MessageLog, ConnectionEvent
+from app.models.database import SessionLocal, Charger, Connector, Session as DBSession, MessageLog, ConnectionEvent, SystemConfig
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -946,6 +946,35 @@ class OCPPHandler:
         
         logger.info(f"Charger {charger_id} removed. Active connections: {len(self.charger_connections)}")
     
+    def get_retry_config(self, charger_id: str = None):
+        """Get retry configuration from database - charger specific or system default"""
+        db = SessionLocal()
+        try:
+            # Try to get charger-specific retry configuration first
+            if charger_id:
+                charger = db.query(Charger).filter(Charger.id == charger_id).first()
+                if charger and charger.max_retries and charger.retry_interval:
+                    return {
+                        "max_retries": charger.max_retries,
+                        "retry_interval": charger.retry_interval,
+                        "retry_enabled": charger.retry_enabled if charger.retry_enabled is not None else True
+                    }
+            
+            # Fall back to system configuration
+            max_retries_config = db.query(SystemConfig).filter(SystemConfig.key == "max_retries").first()
+            retry_interval_config = db.query(SystemConfig).filter(SystemConfig.key == "retry_interval").first()
+            
+            return {
+                "max_retries": int(max_retries_config.value) if max_retries_config else 3,
+                "retry_interval": int(retry_interval_config.value) if retry_interval_config else 5,
+                "retry_enabled": True  # Default to enabled for system config
+            }
+        except Exception as e:
+            logger.error(f"Failed to get retry configuration: {e}")
+            return {"max_retries": 3, "retry_interval": 5, "retry_enabled": True}  # Default fallback
+        finally:
+            db.close()
+    
     async def create_or_update_charger_on_connect(self, charger_id: str, websocket: WebSocketServerProtocol):
         """Create charger record with default values when WebSocket connects"""
         logger.info(f"Creating/updating charger {charger_id} on connect")
@@ -979,6 +1008,9 @@ class OCPPHandler:
                     is_connected=True,
                     connection_time=datetime.utcnow(),
                     last_heartbeat=datetime.utcnow(),
+                    max_retries=3,  # Default retry attempts
+                    retry_interval=5,  # Default retry interval in seconds
+                    retry_enabled=True,  # Default retry enabled
                     configuration={
                         "remote_address": remote_address,
                         "user_agent": user_agent,
@@ -1148,23 +1180,34 @@ class OCPPHandler:
                 logger.error(f"Error in message processor: {e}")
     
     async def retry_pending_messages(self):
-        """Background task to retry failed messages"""
+        """Background task to retry failed messages using database configuration"""
         while True:
             try:
-                await asyncio.sleep(10)  # Check every 10 seconds (increased from 5)
+                await asyncio.sleep(10)  # Check every 10 seconds
                 
                 current_time = datetime.utcnow()
                 expired_messages = []
                 
                 for message_id, pending_msg in self.pending_messages.items():
-                    # Check if message has expired (60 seconds timeout, increased from 30)
+                    # Get retry configuration for this charger
+                    retry_config = self.get_retry_config(pending_msg.charger_id)
+                    max_retries = retry_config["max_retries"]
+                    retry_interval = retry_config["retry_interval"]
+                    retry_enabled = retry_config["retry_enabled"]
+                    
+                    # Check if retry is disabled for this charger
+                    if not retry_enabled:
+                        logger.debug(f"Retry disabled for charger {pending_msg.charger_id}, removing message {message_id}")
+                        expired_messages.append(message_id)
+                        continue
+                    
+                    # Check if message has expired (60 seconds timeout)
                     if (current_time - pending_msg.timestamp).total_seconds() > 60:
                         expired_messages.append(message_id)
-                    elif pending_msg.retry_count < pending_msg.max_retries:
+                    elif pending_msg.retry_count < max_retries:
                         # Only retry if:
                         # 1. The last send attempt failed (send_successful = False), OR
-                        # 2. Enough time has passed since last successful send (20 seconds minimum)
-                        time_since_last_attempt = (current_time - pending_msg.timestamp).total_seconds()
+                        # 2. Enough time has passed since last successful send (using retry_interval)
                         should_retry = False
                         
                         if not pending_msg.send_successful:
@@ -1173,11 +1216,11 @@ class OCPPHandler:
                         elif pending_msg.last_send_attempt:
                             # Check if enough time has passed since last successful send
                             time_since_last_send = (current_time - pending_msg.last_send_attempt).total_seconds()
-                            if time_since_last_send >= 20:
+                            if time_since_last_send >= retry_interval:
                                 should_retry = True
                         
                         if should_retry:
-                            logger.info(f"Retrying message {message_id} ({pending_msg.action}) for {pending_msg.charger_id} (attempt {pending_msg.retry_count + 1})")
+                            logger.info(f"Retrying message {message_id} ({pending_msg.action}) for {pending_msg.charger_id} (attempt {pending_msg.retry_count + 1}/{max_retries}, interval: {retry_interval}s)")
                             # Retry message
                             await self.send_message_to_charger(
                                 pending_msg.charger_id,

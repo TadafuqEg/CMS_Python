@@ -38,6 +38,11 @@ class Charger(Base):
     # Configuration
     configuration = Column(JSON, default=dict)
     
+    # Retry configuration
+    max_retries = Column(Integer, default=3)  # Maximum number of retry attempts
+    retry_interval = Column(Integer, default=5)  # Retry interval in seconds
+    retry_enabled = Column(Boolean, default=True)  # Enable/disable retry functionality
+    
     # Site and organization
     site_id = Column(String, nullable=True)
     organization_id = Column(String, nullable=True)
