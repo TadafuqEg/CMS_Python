@@ -846,11 +846,11 @@ class OCPPHandler:
             "idTagInfo": {"status": "Accepted"}
         }
     
-    async def send_message_to_charger(self, charger_id: str, message: list):
+    async def send_message_to_charger(self, charger_id: str, message: list, add_to_pending: bool = True):
         """Send message to specific charger and track CALL messages"""
         
-        # For CALL messages (type 2), add to pending_messages only if not already exists
-        if message[0] == 2:  # CALL
+        # For CALL messages (type 2), add to pending_messages only if requested and not already exists
+        if message[0] == 2 and add_to_pending:  # CALL
             message_id = message[1]
             action = message[2]
             payload = message[3]
@@ -872,8 +872,8 @@ class OCPPHandler:
         if charger_id not in self.charger_connections:
             logger.warning(f"Charger {charger_id} not connected")
             
-            # Mark send as failed for pending messages
-            if message[0] == 2:  # CALL
+            # Mark send as failed for pending messages (only if add_to_pending is True)
+            if message[0] == 2 and add_to_pending:  # CALL
                 message_id = message[1]
                 if message_id in self.pending_messages:
                     self.pending_messages[message_id].send_successful = False
@@ -889,8 +889,8 @@ class OCPPHandler:
             self.stats["messages_sent"] += 1
             logger.debug(f"Sent message to {charger_id}: {action if message[0] == 2 else 'unknown'}")
             
-            # Mark send as successful for pending messages
-            if message[0] == 2:  # CALL
+            # Mark send as successful for pending messages (only if add_to_pending is True)
+            if message[0] == 2 and add_to_pending:  # CALL
                 message_id = message[1]
                 if message_id in self.pending_messages:
                     self.pending_messages[message_id].send_successful = True
@@ -901,8 +901,8 @@ class OCPPHandler:
             logger.error(f"Failed to send message to {charger_id}: {e}")
             self.stats["messages_failed"] += 1
             
-            # Mark send as failed for pending messages
-            if message[0] == 2:  # CALL
+            # Mark send as failed for pending messages (only if add_to_pending is True)
+            if message[0] == 2 and add_to_pending:  # CALL
                 message_id = message[1]
                 if message_id in self.pending_messages:
                     self.pending_messages[message_id].send_successful = False
@@ -1302,7 +1302,11 @@ class OCPPHandler:
                                 logger.info(f"Sending heartbeat request to charger {charger.id}")
                                 message_id = str(uuid.uuid4())
                                 heartbeat_message = [2, message_id, "GetConfiguration", {"key": ["HeartbeatInterval"]}]
-                                await self.send_message_to_charger(charger.id, heartbeat_message)
+                                
+                                # Send heartbeat request without adding to pending queue (no retry needed)
+                                success = await self.send_message_to_charger(charger.id, heartbeat_message, add_to_pending=False)
+                                if not success:
+                                    logger.warning(f"Failed to send heartbeat request to {charger.id} - charger not actually connected")
                             else:
                                 logger.debug(f"Skipping heartbeat request for newly connected charger {charger.id}")
                     
