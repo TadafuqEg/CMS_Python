@@ -1,18 +1,19 @@
 """
 OCPP control endpoints for remote operations
 """
+import asyncio
 from pydantic import BaseModel, validator, Field, constr
 import uuid
 from datetime import datetime
 from typing import Dict, Any, List, Optional
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 import uuid
 import json
 import logging
 from typing import Literal
-from app.models.database import get_db, ConnectionEvent, Connector,SessionLocal
+from app.models.database import get_db, ConnectionEvent, Connector, SessionLocal, SystemConfig
 
 logger = logging.getLogger(__name__)
 
@@ -414,18 +415,11 @@ async def unlock_connector(
 
     connected_ids = list(ocpp_handler.charger_connections.keys())
     if charger_id not in connected_ids:
-        disconnect_event = ConnectionEvent(
-            charger_id=charger_id,
-            event_type="DISCONNECT",
-            connection_id=latest_connection_event.connection_id,
-            reason="Connection lost during command",
-            session_duration=int((datetime.utcnow() - latest_connection_event.timestamp).total_seconds())
-        )
-        db.add(disconnect_event)
-        db.commit()
+        # Don't create disconnect event - let OCPP handler manage connection state
+        logger.warning(f"Charger {charger_id} not found in active connections during unlock command")
         raise HTTPException(
             status_code=400,
-            detail=f"Charger '{charger_id}' connection lost."
+            detail=f"Charger '{charger_id}' is not currently connected. Please check connection status."
         )
 
     # Construct OCPP message
@@ -516,18 +510,11 @@ async def get_configuration(
 
     connected_ids = list(ocpp_handler.charger_connections.keys())
     if charger_id not in connected_ids:
-        disconnect_event = ConnectionEvent(
-            charger_id=charger_id,
-            event_type="DISCONNECT",
-            connection_id=latest_connection_event.connection_id,
-            reason="Connection lost during command",
-            session_duration=int((datetime.utcnow() - latest_connection_event.timestamp).total_seconds())
-        )
-        db.add(disconnect_event)
-        db.commit()
+        # Don't create disconnect event - let OCPP handler manage connection state
+        logger.warning(f"Charger {charger_id} not found in active connections during command")
         raise HTTPException(
             status_code=400,
-            detail=f"Charger '{charger_id}' connection lost."
+            detail=f"Charger '{charger_id}' is not currently connected. Please check connection status."
         )
 
     # Construct OCPP message
@@ -580,27 +567,22 @@ async def set_configuration(
             detail=f"Charger '{charger_id}' has never connected."
         )
 
-    if latest_connection_event.event_type != "CONNECT":
-        raise HTTPException(
-            status_code=400,
-            detail=f"Charger '{charger_id}' is not currently connected. Last event: '{latest_connection_event.event_type}'"
-        )
+    # Allow sending messages to disconnected chargers for retry mechanism testing
+    # if latest_connection_event.event_type != "CONNECT":
+    #     raise HTTPException(
+    #         status_code=400,
+    #         detail=f"Charger '{charger_id}' is not currently connected. Last event: '{latest_connection_event.event_type}'"
+    #     )
 
-    connected_ids = list(ocpp_handler.charger_connections.keys())
-    if charger_id not in connected_ids:
-        disconnect_event = ConnectionEvent(
-            charger_id=charger_id,
-            event_type="DISCONNECT",
-            connection_id=latest_connection_event.connection_id,
-            reason="Connection lost during command",
-            session_duration=int((datetime.utcnow() - latest_connection_event.timestamp).total_seconds())
-        )
-        db.add(disconnect_event)
-        db.commit()
-        raise HTTPException(
-            status_code=400,
-            detail=f"Charger '{charger_id}' connection lost."
-        )
+    # Allow sending messages to disconnected chargers for retry mechanism testing
+    # connected_ids = list(ocpp_handler.charger_connections.keys())
+    # if charger_id not in connected_ids:
+    #     # Don't create disconnect event - let OCPP handler manage connection state
+    #     logger.warning(f"Charger {charger_id} not found in active connections during command")
+    #     raise HTTPException(
+    #         status_code=400,
+    #         detail=f"Charger '{charger_id}' is not currently connected. Please check connection status."
+    #     )
 
     # Construct OCPP message
     message_id = str(uuid.uuid4())
@@ -608,9 +590,14 @@ async def set_configuration(
     ocpp_message = [2, message_id, "ChangeConfiguration", ocpp_payload]
 
     # Send via OCPPHandler (automatically adds to pending_messages)
+    logger.info(f"DEBUG: About to send ChangeConfiguration to {charger_id}")
     success = await ocpp_handler.send_message_to_charger(charger_id, ocpp_message)
+    logger.info(f"DEBUG: send_message_to_charger returned {success} for {charger_id}")
+    
+    # For disconnected chargers, success=False is expected - message is queued for retry
     if not success:
-        raise HTTPException(status_code=500, detail="Failed to send ChangeConfiguration command")
+        logger.info(f"DEBUG: Charger {charger_id} not connected, message queued for retry")
+        # Don't raise exception - message is queued for retry
 
     # Log outgoing request immediately
     await ocpp_handler.log_message(
@@ -618,12 +605,17 @@ async def set_configuration(
         None, json.dumps(ocpp_message), None
     )
 
-    logger.info(f"ChangeConfiguration sent to {charger_id}: key='{set_config.key}', value='{set_config.value}' (message_id={message_id})")
+    if success:
+        logger.info(f"ChangeConfiguration sent to {charger_id}: key='{set_config.key}', value='{set_config.value}' (message_id={message_id})")
+        response_message = f"ChangeConfiguration command sent for key '{set_config.key}'"
+    else:
+        logger.info(f"ChangeConfiguration queued for retry to {charger_id}: key='{set_config.key}', value='{set_config.value}' (message_id={message_id})")
+        response_message = f"ChangeConfiguration command queued for retry (charger not connected)"
 
     return OCPPResponse(
         status="Accepted",
         message_id=message_id,
-        message=f"ChangeConfiguration command sent for key '{set_config.key}'"
+        message=response_message
     )
 
 
@@ -661,18 +653,11 @@ async def change_availability(
 
     connected_ids = list(ocpp_handler.charger_connections.keys())
     if charger_id not in connected_ids:
-        disconnect_event = ConnectionEvent(
-            charger_id=charger_id,
-            event_type="DISCONNECT",
-            connection_id=latest_connection_event.connection_id,
-            reason="Connection lost during command",
-            session_duration=int((datetime.utcnow() - latest_connection_event.timestamp).total_seconds())
-        )
-        db.add(disconnect_event)
-        db.commit()
+        # Don't create disconnect event - let OCPP handler manage connection state
+        logger.warning(f"Charger {charger_id} not found in active connections during availability change")
         raise HTTPException(
             status_code=400,
-            detail=f"Charger '{charger_id}' connection lost."
+            detail=f"Charger '{charger_id}' is not currently connected. Please check connection status."
         )
 
     # Construct OCPP message
@@ -732,18 +717,11 @@ async def reset_charger(
 
     connected_ids = list(ocpp_handler.charger_connections.keys())
     if charger_id not in connected_ids:
-        disconnect_event = ConnectionEvent(
-            charger_id=charger_id,
-            event_type="DISCONNECT",
-            connection_id=latest_connection_event.connection_id,
-            reason="Connection lost during command",
-            session_duration=int((datetime.utcnow() - latest_connection_event.timestamp).total_seconds())
-        )
-        db.add(disconnect_event)
-        db.commit()
+        # Don't create disconnect event - let OCPP handler manage connection state
+        logger.warning(f"Charger {charger_id} not found in active connections during reset command")
         raise HTTPException(
             status_code=400,
-            detail=f"Charger '{charger_id}' connection lost."
+            detail=f"Charger '{charger_id}' is not currently connected. Please check connection status."
         )
 
     # Construct OCPP message
@@ -865,20 +843,11 @@ async def charging_remote_start(request: Request, body: RemoteStartBody, db: Ses
     # Double-check that charger is still in active connections
     connected_ids = list(ocpp_handler.charger_connections.keys())
     if body.charger_id not in connected_ids:
-        # Update the connection event to DISCONNECT if it's not in active connections
-        disconnect_event = ConnectionEvent(
-            charger_id=body.charger_id,
-            event_type="DISCONNECT",
-            connection_id=latest_connection_event.connection_id,
-            reason="Connection lost - not in active connections",
-            session_duration=int((datetime.utcnow() - latest_connection_event.timestamp).total_seconds())
-        )
-        db.add(disconnect_event)
-        db.commit()
-        
+        # Don't create disconnect event - let OCPP handler manage connection state
+        logger.warning(f"Charger {body.charger_id} not found in active connections during remote start")
         raise HTTPException(
             status_code=400,
-            detail=f"Charger '{body.charger_id}' connection was lost. Please reconnect the charger via OCPP WebSocket."
+            detail=f"Charger '{body.charger_id}' is not currently connected. Please check connection status."
         )
     
     # Verify the connection_id matches (extra safety check)
@@ -988,18 +957,11 @@ async def send_local_list(
 
     connected_ids = list(ocpp_handler.charger_connections.keys())
     if charger_id not in connected_ids:
-        disconnect_event = ConnectionEvent(
-            charger_id=charger_id,
-            event_type="DISCONNECT",
-            connection_id=latest_connection_event.connection_id,
-            reason="Connection lost during command",
-            session_duration=int((datetime.utcnow() - latest_connection_event.timestamp).total_seconds())
-        )
-        db.add(disconnect_event)
-        db.commit()
+        # Don't create disconnect event - let OCPP handler manage connection state
+        logger.warning(f"Charger {charger_id} not found in active connections during command")
         raise HTTPException(
             status_code=400,
-            detail=f"Charger '{charger_id}' connection lost."
+            detail=f"Charger '{charger_id}' is not currently connected. Please check connection status."
         )
 
     # Construct OCPP message
@@ -1039,6 +1001,48 @@ async def send_local_list(
         message=f"SendLocalList command sent to charger {charger_id} with version {list_version}"
     )
 
+@router.post("/heartbeat-monitor/stop")
+async def stop_heartbeat_monitor(request: Request):
+    """Stop the heartbeat monitor task"""
+    ocpp_handler = getattr(request.app.state, "ocpp_handler", None)
+    if not ocpp_handler:
+        raise HTTPException(status_code=500, detail="OCPP handler not available")
+    
+    if ocpp_handler.heartbeat_task and not ocpp_handler.heartbeat_task.done():
+        ocpp_handler.heartbeat_task.cancel()
+        logger.info("Heartbeat monitor stopped")
+        return {"status": "success", "message": "Heartbeat monitor stopped"}
+    else:
+        return {"status": "info", "message": "Heartbeat monitor was not running"}
+
+@router.post("/heartbeat-monitor/start")
+async def start_heartbeat_monitor(request: Request):
+    """Start the heartbeat monitor task"""
+    ocpp_handler = getattr(request.app.state, "ocpp_handler", None)
+    if not ocpp_handler:
+        raise HTTPException(status_code=500, detail="OCPP handler not available")
+    
+    if ocpp_handler.heartbeat_task and not ocpp_handler.heartbeat_task.done():
+        return {"status": "info", "message": "Heartbeat monitor is already running"}
+    else:
+        ocpp_handler.heartbeat_task = asyncio.create_task(ocpp_handler.heartbeat_monitor())
+        logger.info("Heartbeat monitor started")
+        return {"status": "success", "message": "Heartbeat monitor started"}
+
+@router.get("/heartbeat-monitor/status")
+async def get_heartbeat_monitor_status(request: Request):
+    """Get the heartbeat monitor status"""
+    ocpp_handler = getattr(request.app.state, "ocpp_handler", None)
+    if not ocpp_handler:
+        raise HTTPException(status_code=500, detail="OCPP handler not available")
+    
+    is_running = ocpp_handler.heartbeat_task and not ocpp_handler.heartbeat_task.done()
+    return {
+        "status": "running" if is_running else "stopped",
+        "is_running": is_running,
+        "task_exists": ocpp_handler.heartbeat_task is not None
+    }
+
 @router.post("/ocpp/cache/clear", response_model=OCPPResponse)
 async def clear_cache(
     request: Request,
@@ -1071,18 +1075,11 @@ async def clear_cache(
 
     connected_ids = list(ocpp_handler.charger_connections.keys())
     if charger_id not in connected_ids:
-        disconnect_event = ConnectionEvent(
-            charger_id=charger_id,
-            event_type="DISCONNECT",
-            connection_id=latest_connection_event.connection_id,
-            reason="Connection lost during command",
-            session_duration=int((datetime.utcnow() - latest_connection_event.timestamp).total_seconds())
-        )
-        db.add(disconnect_event)
-        db.commit()
+        # Don't create disconnect event - let OCPP handler manage connection state
+        logger.warning(f"Charger {charger_id} not found in active connections during command")
         raise HTTPException(
             status_code=400,
-            detail=f"Charger '{charger_id}' connection lost."
+            detail=f"Charger '{charger_id}' is not currently connected. Please check connection status."
         )
 
     # Construct OCPP message
@@ -1280,18 +1277,11 @@ async def get_local_list_version(
 
     connected_ids = list(ocpp_handler.charger_connections.keys())
     if charger_id not in connected_ids:
-        disconnect_event = ConnectionEvent(
-            charger_id=charger_id,
-            event_type="DISCONNECT",
-            connection_id=latest_connection_event.connection_id,
-            reason="Connection lost during command",
-            session_duration=int((datetime.utcnow() - latest_connection_event.timestamp).total_seconds())
-        )
-        db.add(disconnect_event)
-        db.commit()
+        # Don't create disconnect event - let OCPP handler manage connection state
+        logger.warning(f"Charger {charger_id} not found in active connections during command")
         raise HTTPException(
             status_code=400,
-            detail=f"Charger '{charger_id}' connection lost."
+            detail=f"Charger '{charger_id}' is not currently connected. Please check connection status."
         )
 
     # Construct OCPP message
@@ -1392,6 +1382,202 @@ async def get_connection_event_stats(request: Request = None, db: Session = Depe
         raise HTTPException(status_code=500, detail=f"Failed to get connection event stats: {e}")
 
 # Make sure your router is included with the correct prefix in app.main.py:
+# Retry Configuration Models
+class RetryConfigRequest(BaseModel):
+    max_retries: int = Field(..., ge=1, le=10, description="Maximum number of retry attempts (1-10)")
+    retry_interval: int = Field(..., ge=1, le=60, description="Retry interval in seconds (1-60)")
+    retry_enabled: bool = Field(True, description="Enable/disable retry functionality")
+
+class RetryConfigResponse(BaseModel):
+    charger_id: str
+    max_retries: int
+    retry_interval: int
+    retry_enabled: bool
+    message: str
+
+class SystemRetryConfigRequest(BaseModel):
+    max_retries: int = Field(..., ge=1, le=10, description="Default maximum retry attempts (1-10)")
+    retry_interval: int = Field(..., ge=1, le=60, description="Default retry interval in seconds (1-60)")
+
+class SystemRetryConfigResponse(BaseModel):
+    max_retries: int
+    retry_interval: int
+    message: str
+
+# Retry Configuration Endpoints
+@router.post("/retry-config/{charger_id}", response_model=RetryConfigResponse)
+async def set_charger_retry_config(
+    charger_id: str,
+    config: RetryConfigRequest,
+    db: Session = Depends(get_db)
+):
+    """Set retry configuration for a specific charger"""
+    try:
+        charger = db.query(Charger).filter(Charger.id == charger_id).first()
+        if not charger:
+            raise HTTPException(status_code=404, detail=f"Charger '{charger_id}' not found")
+        
+        charger.max_retries = config.max_retries
+        charger.retry_interval = config.retry_interval
+        charger.retry_enabled = config.retry_enabled
+        charger.updated_at = datetime.utcnow()
+        
+        db.commit()
+        
+        logger.info(f"Updated retry config for charger {charger_id}: max_retries={config.max_retries}, retry_interval={config.retry_interval}s, retry_enabled={config.retry_enabled}")
+        
+        return RetryConfigResponse(
+            charger_id=charger_id,
+            max_retries=config.max_retries,
+            retry_interval=config.retry_interval,
+            retry_enabled=config.retry_enabled,
+            message=f"Retry configuration updated for charger {charger_id}"
+        )
+        
+    except Exception as e:
+        logger.error(f"Failed to update retry config for charger {charger_id}: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to update retry configuration: {str(e)}")
+
+@router.get("/retry-config/{charger_id}", response_model=RetryConfigResponse)
+async def get_charger_retry_config(
+    charger_id: str,
+    db: Session = Depends(get_db)
+):
+    """Get retry configuration for a specific charger"""
+    try:
+        charger = db.query(Charger).filter(Charger.id == charger_id).first()
+        if not charger:
+            raise HTTPException(status_code=404, detail=f"Charger '{charger_id}' not found")
+        
+        return RetryConfigResponse(
+            charger_id=charger_id,
+            max_retries=charger.max_retries or 3,
+            retry_interval=charger.retry_interval or 5,
+            retry_enabled=charger.retry_enabled if charger.retry_enabled is not None else True,
+            message=f"Retry configuration for charger {charger_id}"
+        )
+        
+    except Exception as e:
+        logger.error(f"Failed to get retry config for charger {charger_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get retry configuration: {str(e)}")
+
+@router.post("/retry-config/system", response_model=SystemRetryConfigResponse)
+async def set_system_retry_config(
+    config: SystemRetryConfigRequest,
+    db: Session = Depends(get_db)
+):
+    """Set default retry configuration for all chargers"""
+    try:
+        # Update or create max_retries config
+        max_retries_config = db.query(SystemConfig).filter(SystemConfig.key == "max_retries").first()
+        if max_retries_config:
+            max_retries_config.value = str(config.max_retries)
+            max_retries_config.updated_at = datetime.utcnow()
+        else:
+            max_retries_config = SystemConfig(
+                key="max_retries",
+                value=str(config.max_retries),
+                description="Default maximum retry attempts for failed messages"
+            )
+            db.add(max_retries_config)
+        
+        # Update or create retry_interval config
+        retry_interval_config = db.query(SystemConfig).filter(SystemConfig.key == "retry_interval").first()
+        if retry_interval_config:
+            retry_interval_config.value = str(config.retry_interval)
+            retry_interval_config.updated_at = datetime.utcnow()
+        else:
+            retry_interval_config = SystemConfig(
+                key="retry_interval",
+                value=str(config.retry_interval),
+                description="Default retry interval in seconds"
+            )
+            db.add(retry_interval_config)
+        
+        db.commit()
+        
+        logger.info(f"Updated system retry config: max_retries={config.max_retries}, retry_interval={config.retry_interval}s")
+        
+        return SystemRetryConfigResponse(
+            max_retries=config.max_retries,
+            retry_interval=config.retry_interval,
+            message="System retry configuration updated successfully"
+        )
+        
+    except Exception as e:
+        logger.error(f"Failed to update system retry config: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to update system retry configuration: {str(e)}")
+
+@router.get("/retry-config/system", response_model=SystemRetryConfigResponse)
+async def get_system_retry_config(
+    db: Session = Depends(get_db)
+):
+    """Get default retry configuration"""
+    try:
+        max_retries_config = db.query(SystemConfig).filter(SystemConfig.key == "max_retries").first()
+        retry_interval_config = db.query(SystemConfig).filter(SystemConfig.key == "retry_interval").first()
+        
+        return SystemRetryConfigResponse(
+            max_retries=int(max_retries_config.value) if max_retries_config else 3,
+            retry_interval=int(retry_interval_config.value) if retry_interval_config else 5,
+            message="System retry configuration"
+        )
+        
+    except Exception as e:
+        logger.error(f"Failed to get system retry config: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get system retry configuration: {str(e)}")
+
+# Simple retry enable/disable endpoint
+@router.post("/retry-config/{charger_id}/enable")
+async def enable_charger_retry(
+    charger_id: str,
+    db: Session = Depends(get_db)
+):
+    """Enable retry functionality for a specific charger"""
+    try:
+        charger = db.query(Charger).filter(Charger.id == charger_id).first()
+        if not charger:
+            raise HTTPException(status_code=404, detail=f"Charger '{charger_id}' not found")
+        
+        charger.retry_enabled = True
+        charger.updated_at = datetime.utcnow()
+        db.commit()
+        
+        logger.info(f"Enabled retry for charger {charger_id}")
+        
+        return {"charger_id": charger_id, "retry_enabled": True, "message": f"Retry enabled for charger {charger_id}"}
+        
+    except Exception as e:
+        logger.error(f"Failed to enable retry for charger {charger_id}: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to enable retry: {str(e)}")
+
+@router.post("/retry-config/{charger_id}/disable")
+async def disable_charger_retry(
+    charger_id: str,
+    db: Session = Depends(get_db)
+):
+    """Disable retry functionality for a specific charger"""
+    try:
+        charger = db.query(Charger).filter(Charger.id == charger_id).first()
+        if not charger:
+            raise HTTPException(status_code=404, detail=f"Charger '{charger_id}' not found")
+        
+        charger.retry_enabled = False
+        charger.updated_at = datetime.utcnow()
+        db.commit()
+        
+        logger.info(f"Disabled retry for charger {charger_id}")
+        
+        return {"charger_id": charger_id, "retry_enabled": False, "message": f"Retry disabled for charger {charger_id}"}
+        
+    except Exception as e:
+        logger.error(f"Failed to disable retry for charger {charger_id}: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to disable retry: {str(e)}")
+
 # app.include_router(ocpp_control.router, prefix="/api", tags=["OCPP Control"])
 
 # Also, ensure your endpoint is defined as:

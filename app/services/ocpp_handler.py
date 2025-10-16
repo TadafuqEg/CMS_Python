@@ -17,7 +17,7 @@ import websockets
 from fastapi import WebSocket
 from websockets.server import WebSocketServerProtocol
 
-from app.models.database import SessionLocal, Charger, Connector, Session as DBSession, MessageLog, ConnectionEvent
+from app.models.database import SessionLocal, Charger, Connector, Session as DBSession, MessageLog, ConnectionEvent, SystemConfig
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -32,6 +32,8 @@ class PendingMessage:
     timestamp: datetime
     retry_count: int = 0
     max_retries: int = 3
+    last_send_attempt: Optional[datetime] = None
+    send_successful: bool = False
     callback: Optional[callable] = None
 
 class OCPPHandler:
@@ -55,6 +57,7 @@ class OCPPHandler:
         self.message_processor_task = None
         self.retry_task = None
         self.heartbeat_task = None
+        self.keepalive_task = None
         
         # Statistics
         self.stats = {
@@ -89,15 +92,20 @@ class OCPPHandler:
                 settings.OCPP_WEBSOCKET_PORT,
                 subprotocols=settings.OCPP_SUBPROTOCOLS,
                 ssl=ssl_context,
-                ping_interval=20,
-                ping_timeout=10,
-                close_timeout=10
+                ping_interval=120,  # Increased to 120 seconds - much less aggressive pinging
+                ping_timeout=60,    # Increased to 60 seconds - more time for pong response
+                close_timeout=10,
+                max_size=2**20,  # 1MB max message size
+                max_queue=32,   # Max queued messages
+                read_limit=2**16,  # 64KB read buffer
+                write_limit=2**16  # 64KB write buffer
             )
             
             # Start background tasks
             self.message_processor_task = asyncio.create_task(self.message_processor())
             self.retry_task = asyncio.create_task(self.retry_pending_messages())
             self.heartbeat_task = asyncio.create_task(self.heartbeat_monitor())
+            self.keepalive_task = asyncio.create_task(self.keepalive_monitor())
             
             logger.info(f"OCPP WebSocket server started on {settings.OCPP_WEBSOCKET_HOST}:{settings.OCPP_WEBSOCKET_PORT}")
             
@@ -116,6 +124,8 @@ class OCPPHandler:
             self.retry_task.cancel()
         if self.heartbeat_task:
             self.heartbeat_task.cancel()
+        if self.keepalive_task:
+            self.keepalive_task.cancel()
         
         # Close all connections
         for charger_id, websocket in self.charger_connections.items():
@@ -836,19 +846,17 @@ class OCPPHandler:
             "idTagInfo": {"status": "Accepted"}
         }
     
-    async def send_message_to_charger(self, charger_id: str, message: list):
+    async def send_message_to_charger(self, charger_id: str, message: list, add_to_pending: bool = True):
         """Send message to specific charger and track CALL messages"""
-        if charger_id not in self.charger_connections:
-            logger.warning(f"Charger {charger_id} not connected")
-            return False
-
-        websocket = self.charger_connections[charger_id]
-        try:
-            # For CALL messages (type 2), add to pending_messages
-            if message[0] == 2:  # CALL
-                message_id = message[1]
-                action = message[2]
-                payload = message[3]
+        
+        # For CALL messages (type 2), add to pending_messages only if requested and not already exists
+        if message[0] == 2 and add_to_pending:  # CALL
+            message_id = message[1]
+            action = message[2]
+            payload = message[3]
+            
+            # Only create new PendingMessage if one doesn't already exist
+            if message_id not in self.pending_messages:
                 pending_msg = PendingMessage(
                     message_id=message_id,
                     charger_id=charger_id,
@@ -858,15 +866,52 @@ class OCPPHandler:
                 )
                 self.pending_messages[message_id] = pending_msg
                 logger.debug(f"Added pending message {message_id} ({action}) for {charger_id}")
+            else:
+                logger.debug(f"Pending message {message_id} already exists, not creating new one")
+        
+        if charger_id not in self.charger_connections:
+            logger.warning(f"Charger {charger_id} not connected")
+            
+            # Mark send as failed for pending messages (only if add_to_pending is True)
+            if message[0] == 2 and add_to_pending:  # CALL
+                message_id = message[1]
+                if message_id in self.pending_messages:
+                    self.pending_messages[message_id].send_successful = False
+                    self.pending_messages[message_id].last_send_attempt = datetime.utcnow()
+                    logger.info(f"DEBUG: Marked message {message_id} as failed (charger not connected)")
+            
+            logger.info(f"DEBUG: send_message_to_charger returning False for {charger_id} (not connected)")
+            return False
 
+        websocket = self.charger_connections[charger_id]
+        try:
             await websocket.send(json.dumps(message))
             self.stats["messages_sent"] += 1
             logger.debug(f"Sent message to {charger_id}: {action if message[0] == 2 else 'unknown'}")
+            
+            # Mark send as successful for pending messages (only if add_to_pending is True)
+            if message[0] == 2 and add_to_pending:  # CALL
+                message_id = message[1]
+                if message_id in self.pending_messages:
+                    self.pending_messages[message_id].send_successful = True
+                    self.pending_messages[message_id].last_send_attempt = datetime.utcnow()
+            
             return True
         except Exception as e:
             logger.error(f"Failed to send message to {charger_id}: {e}")
             self.stats["messages_failed"] += 1
-            # Retry logic is handled in retry_pending_messages
+            
+            # Mark send as failed for pending messages (only if add_to_pending is True)
+            if message[0] == 2 and add_to_pending:  # CALL
+                message_id = message[1]
+                if message_id in self.pending_messages:
+                    self.pending_messages[message_id].send_successful = False
+                    self.pending_messages[message_id].last_send_attempt = datetime.utcnow()
+            
+            # Clean up stale connection if WebSocket send fails
+            logger.warning(f"WebSocket send failed for {charger_id}, cleaning up stale connection")
+            await self.remove_charger_connection(charger_id)
+            
             return False
     
     async def broadcast_to_chargers(self, message: str):
@@ -924,6 +969,35 @@ class OCPPHandler:
         
         logger.info(f"Charger {charger_id} removed. Active connections: {len(self.charger_connections)}")
     
+    def get_retry_config(self, charger_id: str = None):
+        """Get retry configuration from database - charger specific or system default"""
+        db = SessionLocal()
+        try:
+            # Try to get charger-specific retry configuration first
+            if charger_id:
+                charger = db.query(Charger).filter(Charger.id == charger_id).first()
+                if charger and charger.max_retries and charger.retry_interval:
+                    return {
+                        "max_retries": charger.max_retries,
+                        "retry_interval": charger.retry_interval,
+                        "retry_enabled": charger.retry_enabled if charger.retry_enabled is not None else True
+                    }
+            
+            # Fall back to system configuration
+            max_retries_config = db.query(SystemConfig).filter(SystemConfig.key == "max_retries").first()
+            retry_interval_config = db.query(SystemConfig).filter(SystemConfig.key == "retry_interval").first()
+            
+            return {
+                "max_retries": int(max_retries_config.value) if max_retries_config else 3,
+                "retry_interval": int(retry_interval_config.value) if retry_interval_config else 5,
+                "retry_enabled": True  # Default to enabled for system config
+            }
+        except Exception as e:
+            logger.error(f"Failed to get retry configuration: {e}")
+            return {"max_retries": 3, "retry_interval": 5, "retry_enabled": True}  # Default fallback
+        finally:
+            db.close()
+    
     async def create_or_update_charger_on_connect(self, charger_id: str, websocket: WebSocketServerProtocol):
         """Create charger record with default values when WebSocket connects"""
         logger.info(f"Creating/updating charger {charger_id} on connect")
@@ -957,6 +1031,9 @@ class OCPPHandler:
                     is_connected=True,
                     connection_time=datetime.utcnow(),
                     last_heartbeat=datetime.utcnow(),
+                    max_retries=3,  # Default retry attempts
+                    retry_interval=5,  # Default retry interval in seconds
+                    retry_enabled=True,  # Default retry enabled
                     configuration={
                         "remote_address": remote_address,
                         "user_agent": user_agent,
@@ -1100,7 +1177,6 @@ class OCPPHandler:
             
             db.add(event_log)
             db.commit()
-            
             logger.info(f"Logged {event_type} event for charger {charger_id}")
             
         except Exception as e:
@@ -1120,30 +1196,70 @@ class OCPPHandler:
                 logger.error(f"Error in message processor: {e}")
     
     async def retry_pending_messages(self):
-        """Background task to retry failed messages"""
+        """Background task to retry failed messages using database configuration"""
         while True:
             try:
-                await asyncio.sleep(5)  # Check every 5 seconds
+                await asyncio.sleep(10)  # Check every 10 seconds
                 
                 current_time = datetime.utcnow()
                 expired_messages = []
                 
                 for message_id, pending_msg in self.pending_messages.items():
-                    # Check if message has expired (30 seconds timeout)
-                    if (current_time - pending_msg.timestamp).total_seconds() > 30:
+                    # Get retry configuration for this charger
+                    retry_config = self.get_retry_config(pending_msg.charger_id)
+                    max_retries = retry_config["max_retries"]
+                    retry_interval = retry_config["retry_interval"]
+                    retry_enabled = retry_config["retry_enabled"]
+                    
+                    # Check if retry is disabled for this charger
+                    if not retry_enabled:
+                        logger.debug(f"Retry disabled for charger {pending_msg.charger_id}, removing message {message_id}")
                         expired_messages.append(message_id)
-                    elif pending_msg.retry_count < pending_msg.max_retries:
-                        # Retry message
-                        await self.send_message_to_charger(
-                            pending_msg.charger_id,
-                            [2, pending_msg.message_id, pending_msg.action, pending_msg.payload]
-                        )
-                        pending_msg.retry_count += 1
-                        pending_msg.timestamp = current_time
+                        continue
+                    
+                    # Check if message has expired (60 seconds timeout)
+                    if (current_time - pending_msg.timestamp).total_seconds() > 60:
+                        expired_messages.append(message_id)
+                    elif pending_msg.retry_count < max_retries:
+                        # Only retry if:
+                        # 1. The last send attempt failed (send_successful = False), OR
+                        # 2. Enough time has passed since last successful send (using retry_interval)
+                        should_retry = False
+                        
+                        if not pending_msg.send_successful:
+                            # Previous send failed, retry immediately
+                            should_retry = True
+                            logger.info(f"DEBUG: Retry condition 1 - send_successful=False for {message_id}")
+                        elif pending_msg.last_send_attempt:
+                            # Check if enough time has passed since last successful send
+                            time_since_last_send = (current_time - pending_msg.last_send_attempt).total_seconds()
+                            if time_since_last_send >= retry_interval:
+                                should_retry = True
+                                logger.info(f"DEBUG: Retry condition 2 - time_since_last_send={time_since_last_send}s >= retry_interval={retry_interval}s for {message_id}")
+                            else:
+                                logger.info(f"DEBUG: No retry - time_since_last_send={time_since_last_send}s < retry_interval={retry_interval}s for {message_id}")
+                        else:
+                            logger.info(f"DEBUG: No retry - no last_send_attempt for {message_id}")
+                        
+                        logger.info(f"DEBUG: should_retry={should_retry} for {message_id}")
+                        
+                        if should_retry:
+                            logger.info(f"Retrying message {message_id} ({pending_msg.action}) for {pending_msg.charger_id} (attempt {pending_msg.retry_count + 1}/{max_retries}, interval: {retry_interval}s)")
+                            logger.info(f"DEBUG: Before retry - retry_count={pending_msg.retry_count}, send_successful={pending_msg.send_successful}, last_send_attempt={pending_msg.last_send_attempt}")
+                            # Retry message
+                            await self.send_message_to_charger(
+                                pending_msg.charger_id,
+                                [2, pending_msg.message_id, pending_msg.action, pending_msg.payload]
+                            )
+                            pending_msg.retry_count += 1
+                            pending_msg.timestamp = current_time
+                            logger.info(f"DEBUG: After retry - retry_count={pending_msg.retry_count}, send_successful={pending_msg.send_successful}")
                 
                 # Remove expired messages
                 for message_id in expired_messages:
                     if message_id in self.pending_messages:
+                        expired_msg = self.pending_messages[message_id]
+                        logger.warning(f"Message {message_id} ({expired_msg.action}) expired after {expired_msg.retry_count} retries")
                         del self.pending_messages[message_id]
                         self.stats["messages_failed"] += 1
                 
@@ -1153,13 +1269,14 @@ class OCPPHandler:
                 logger.error(f"Error in retry task: {e}")
     
     async def heartbeat_monitor(self):
-        """Background task to monitor charger heartbeats"""
+        """Background task to monitor charger heartbeats and send heartbeat requests"""
         while True:
             try:
                 await asyncio.sleep(60)  # Check every minute
                 
                 current_time = datetime.utcnow()
-                timeout_threshold = current_time - timedelta(minutes=5)  # 5 minute timeout
+                timeout_threshold = current_time - timedelta(minutes=10)  # Increased from 5 to 10 minutes
+                heartbeat_request_threshold = current_time - timedelta(minutes=5)  # Request heartbeat if no heartbeat in 5 minutes
                 
                 # Check for chargers that haven't sent heartbeat
                 db = SessionLocal()
@@ -1169,20 +1286,71 @@ class OCPPHandler:
                         Charger.last_heartbeat < timeout_threshold
                     ).all()
                     
-                    for charger in stale_chargers:
-                        logger.warning(f"Charger {charger.id} heartbeat timeout")
-                        charger.status = "Offline"
-                        charger.is_connected = False
-                        charger.updated_at = current_time
-                        
-                        # Remove from active connections
+                    # Send heartbeat requests to chargers that haven't sent heartbeat recently
+                    # But only if they're actually in active connections (not just marked as connected in DB)
+                    chargers_needing_heartbeat = db.query(Charger).filter(
+                        Charger.is_connected == True,
+                        Charger.last_heartbeat < heartbeat_request_threshold
+                    ).all()
+                
+                    for charger in chargers_needing_heartbeat:
                         if charger.id in self.charger_connections:
-                            connection_id = self.connection_ids.get(charger.id)
-                            await self.remove_charger_connection(charger.id, connection_id)
+                            # Only send heartbeat request if charger has been connected for at least 2 minutes
+                            # This prevents disconnecting newly connected chargers
+                            connection_time = charger.updated_at or charger.created_at
+                            if connection_time and (current_time - connection_time).total_seconds() > 120:  # 2 minutes
+                                logger.info(f"Sending heartbeat request to charger {charger.id}")
+                                message_id = str(uuid.uuid4())
+                                heartbeat_message = [2, message_id, "GetConfiguration", {"key": ["HeartbeatInterval"]}]
+                                
+                                # Send heartbeat request without adding to pending queue (no retry needed)
+                                success = await self.send_message_to_charger(charger.id, heartbeat_message, add_to_pending=False)
+                                if not success:
+                                    logger.warning(f"Failed to send heartbeat request to {charger.id} - charger not actually connected")
+                            else:
+                                logger.debug(f"Skipping heartbeat request for newly connected charger {charger.id}")
                     
-                    if stale_chargers:
+                    for charger in stale_chargers:
+                        # Only disconnect if charger has been connected for at least 5 minutes
+                        # This prevents disconnecting newly connected chargers with old heartbeat timestamps
+                        connection_time = charger.updated_at or charger.created_at
+                        if connection_time and (current_time - connection_time).total_seconds() > 300:  # 5 minutes
+                            logger.warning(f"Charger {charger.id} heartbeat timeout (last heartbeat: {charger.last_heartbeat})")
+                            charger.status = "Offline"
+                            charger.is_connected = False
+                            charger.updated_at = current_time
+                            
+                            # Remove from active connections
+                            if charger.id in self.charger_connections:
+                                connection_id = self.connection_ids.get(charger.id)
+                                await self.remove_charger_connection(charger.id, connection_id)
+                        else:
+                            logger.debug(f"Skipping disconnect for newly connected charger {charger.id} with old heartbeat timestamp")
+                    
+                    # Also check for stale WebSocket connections that might not be in DB
+                    stale_websocket_connections = []
+                    for charger_id, websocket in self.charger_connections.items():
+                        try:
+                            # Try to ping the WebSocket to check if it's still alive
+                            await asyncio.wait_for(websocket.ping(), timeout=5.0)
+                            logger.debug(f"WebSocket ping successful for charger {charger_id}")
+                        except asyncio.TimeoutError:
+                            logger.warning(f"WebSocket ping timeout for charger {charger_id}")
+                            stale_websocket_connections.append(charger_id)
+                        except Exception as e:
+                            logger.warning(f"WebSocket ping failed for charger {charger_id}: {e}")
+                            stale_websocket_connections.append(charger_id)
+                    
+                    # Clean up stale WebSocket connections
+                    for charger_id in stale_websocket_connections:
+                        logger.warning(f"Cleaning up stale WebSocket connection for charger {charger_id}")
+                        connection_id = self.connection_ids.get(charger_id)
+                        await self.remove_charger_connection(charger_id, connection_id)
+                    
+                    if stale_chargers or stale_websocket_connections:
                         db.commit()
-                        
+                        logger.info(f"Heartbeat monitor: cleaned up {len(stale_chargers)} stale chargers and {len(stale_websocket_connections)} stale WebSocket connections")
+                    
                 finally:
                     db.close()
                 
@@ -1190,6 +1358,89 @@ class OCPPHandler:
                 break
             except Exception as e:
                 logger.error(f"Error in heartbeat monitor: {e}")
+    
+    async def keepalive_monitor(self):
+        """Background task to keep WebSocket connections alive with periodic pings"""
+        while True:
+            try:
+                await asyncio.sleep(120)  # Check every 2 minutes (much less frequent)
+                
+                if not self.charger_connections:
+                    continue
+                
+                logger.debug(f"Checking {len(self.charger_connections)} charger connections")
+                
+                # Only check WebSocket connection health, don't send manual pings
+                # The WebSocket server handles ping/pong automatically
+                stale_connections = []
+                for charger_id, websocket in self.charger_connections.items():
+                    try:
+                        # Just check if the connection is still open
+                        if websocket.closed:
+                            logger.warning(f"Charger {charger_id} WebSocket connection is closed")
+                            stale_connections.append(charger_id)
+                    except Exception as e:
+                        logger.warning(f"Error checking charger {charger_id} connection: {e}")
+                        stale_connections.append(charger_id)
+                
+                # Clean up stale connections
+                for charger_id in stale_connections:
+                    connection_id = self.connection_ids.get(charger_id)
+                    await self.remove_charger_connection(charger_id, connection_id)
+                
+                # Note: OCPP Heartbeat requests are handled by the heartbeat_monitor task
+                # This keep-alive monitor only handles WebSocket-level pings
+                
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in keep-alive monitor: {e}")
+    
+    async def send_ocpp_heartbeats(self):
+        """Send OCPP Heartbeat requests to chargers that haven't sent messages recently"""
+        try:
+            current_time = datetime.utcnow()
+            heartbeat_threshold = current_time - timedelta(minutes=5)  # Send heartbeat if no message in 5 minutes (less aggressive)
+            
+            db = SessionLocal()
+            try:
+                # Find chargers that haven't sent messages recently
+                chargers_needing_heartbeat = db.query(Charger).filter(
+                    Charger.is_connected == True,
+                    Charger.last_heartbeat < heartbeat_threshold
+                ).all()
+                
+                for charger in chargers_needing_heartbeat:
+                    if charger.id in self.charger_connections:
+                        logger.debug(f"Sending OCPP Heartbeat request to charger {charger.id}")
+                        message_id = str(uuid.uuid4())
+                        heartbeat_message = [2, message_id, "Heartbeat", {}]
+                        await self.send_message_to_charger(charger.id, heartbeat_message)
+                        
+            finally:
+                db.close()
+                
+        except Exception as e:
+            logger.error(f"Error sending OCPP heartbeats: {e}")
+    
+    async def send_keepalive_ping(self, charger_id: str, websocket: WebSocketServerProtocol):
+        """Send a keep-alive ping to a specific charger"""
+        try:
+            # Send WebSocket ping frame
+            await websocket.ping()
+            logger.debug(f"Keep-alive ping sent to charger {charger_id}")
+            
+        except websockets.exceptions.ConnectionClosed:
+            logger.warning(f"Charger {charger_id} connection closed during keep-alive ping")
+            # Remove the connection
+            connection_id = self.connection_ids.get(charger_id)
+            await self.remove_charger_connection(charger_id, connection_id)
+            
+        except Exception as e:
+            logger.warning(f"Keep-alive ping failed for charger {charger_id}: {e}")
+            # Remove the connection if ping fails
+            connection_id = self.connection_ids.get(charger_id)
+            await self.remove_charger_connection(charger_id, connection_id)
     
     def get_stats(self) -> Dict[str, Any]:
         """Get handler statistics"""
