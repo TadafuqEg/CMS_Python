@@ -878,7 +878,9 @@ class OCPPHandler:
                 if message_id in self.pending_messages:
                     self.pending_messages[message_id].send_successful = False
                     self.pending_messages[message_id].last_send_attempt = datetime.utcnow()
+                    logger.info(f"DEBUG: Marked message {message_id} as failed (charger not connected)")
             
+            logger.info(f"DEBUG: send_message_to_charger returning False for {charger_id} (not connected)")
             return False
 
         websocket = self.charger_connections[charger_id]

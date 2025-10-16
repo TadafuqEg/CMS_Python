@@ -589,8 +589,11 @@ async def set_configuration(
     ocpp_message = [2, message_id, "ChangeConfiguration", ocpp_payload]
 
     # Send via OCPPHandler (automatically adds to pending_messages)
+    logger.info(f"DEBUG: About to send ChangeConfiguration to {charger_id}")
     success = await ocpp_handler.send_message_to_charger(charger_id, ocpp_message)
+    logger.info(f"DEBUG: send_message_to_charger returned {success} for {charger_id}")
     if not success:
+        logger.warning(f"DEBUG: send_message_to_charger failed for {charger_id}")
         raise HTTPException(status_code=500, detail="Failed to send ChangeConfiguration command")
 
     # Log outgoing request immediately
