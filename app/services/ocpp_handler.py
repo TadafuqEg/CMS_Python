@@ -1221,14 +1221,23 @@ class OCPPHandler:
                         if not pending_msg.send_successful:
                             # Previous send failed, retry immediately
                             should_retry = True
+                            logger.debug(f"DEBUG: Retry condition 1 - send_successful=False for {message_id}")
                         elif pending_msg.last_send_attempt:
                             # Check if enough time has passed since last successful send
                             time_since_last_send = (current_time - pending_msg.last_send_attempt).total_seconds()
                             if time_since_last_send >= retry_interval:
                                 should_retry = True
+                                logger.debug(f"DEBUG: Retry condition 2 - time_since_last_send={time_since_last_send}s >= retry_interval={retry_interval}s for {message_id}")
+                            else:
+                                logger.debug(f"DEBUG: No retry - time_since_last_send={time_since_last_send}s < retry_interval={retry_interval}s for {message_id}")
+                        else:
+                            logger.debug(f"DEBUG: No retry - no last_send_attempt for {message_id}")
+                        
+                        logger.debug(f"DEBUG: should_retry={should_retry} for {message_id}")
                         
                         if should_retry:
                             logger.info(f"Retrying message {message_id} ({pending_msg.action}) for {pending_msg.charger_id} (attempt {pending_msg.retry_count + 1}/{max_retries}, interval: {retry_interval}s)")
+                            logger.debug(f"DEBUG: Before retry - retry_count={pending_msg.retry_count}, send_successful={pending_msg.send_successful}, last_send_attempt={pending_msg.last_send_attempt}")
                             # Retry message
                             await self.send_message_to_charger(
                                 pending_msg.charger_id,
@@ -1236,6 +1245,7 @@ class OCPPHandler:
                             )
                             pending_msg.retry_count += 1
                             pending_msg.timestamp = current_time
+                            logger.debug(f"DEBUG: After retry - retry_count={pending_msg.retry_count}, send_successful={pending_msg.send_successful}")
                 
                 # Remove expired messages
                 for message_id in expired_messages:
