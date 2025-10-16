@@ -592,9 +592,11 @@ async def set_configuration(
     logger.info(f"DEBUG: About to send ChangeConfiguration to {charger_id}")
     success = await ocpp_handler.send_message_to_charger(charger_id, ocpp_message)
     logger.info(f"DEBUG: send_message_to_charger returned {success} for {charger_id}")
+    
+    # For disconnected chargers, success=False is expected - message is queued for retry
     if not success:
-        logger.warning(f"DEBUG: send_message_to_charger failed for {charger_id}")
-        raise HTTPException(status_code=500, detail="Failed to send ChangeConfiguration command")
+        logger.info(f"DEBUG: Charger {charger_id} not connected, message queued for retry")
+        # Don't raise exception - message is queued for retry
 
     # Log outgoing request immediately
     await ocpp_handler.log_message(
@@ -602,12 +604,17 @@ async def set_configuration(
         None, json.dumps(ocpp_message), None
     )
 
-    logger.info(f"ChangeConfiguration sent to {charger_id}: key='{set_config.key}', value='{set_config.value}' (message_id={message_id})")
+    if success:
+        logger.info(f"ChangeConfiguration sent to {charger_id}: key='{set_config.key}', value='{set_config.value}' (message_id={message_id})")
+        response_message = f"ChangeConfiguration command sent for key '{set_config.key}'"
+    else:
+        logger.info(f"ChangeConfiguration queued for retry to {charger_id}: key='{set_config.key}', value='{set_config.value}' (message_id={message_id})")
+        response_message = f"ChangeConfiguration command queued for retry (charger not connected)"
 
     return OCPPResponse(
         status="Accepted",
         message_id=message_id,
-        message=f"ChangeConfiguration command sent for key '{set_config.key}'"
+        message=response_message
     )
 
 
