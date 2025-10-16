@@ -12,7 +12,7 @@ import ssl
 from datetime import datetime
 
 # Test configuration
-WEBSOCKET_URL = "wss://localhost:9000"
+WEBSOCKET_URL = "wss://localhost:1010"
 FASTAPI_URL = "http://localhost:8000"
 CHARGER_ID = "TEST_CHARGER_001"
 
