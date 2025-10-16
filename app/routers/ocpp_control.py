@@ -1,11 +1,12 @@
 """
 OCPP control endpoints for remote operations
 """
+import asyncio
 from pydantic import BaseModel, validator, Field, constr
 import uuid
 from datetime import datetime
 from typing import Dict, Any, List, Optional
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 import uuid
@@ -999,6 +1000,48 @@ async def send_local_list(
         message_id=message_id,
         message=f"SendLocalList command sent to charger {charger_id} with version {list_version}"
     )
+
+@router.post("/heartbeat-monitor/stop")
+async def stop_heartbeat_monitor(request: Request):
+    """Stop the heartbeat monitor task"""
+    ocpp_handler = getattr(request.app.state, "ocpp_handler", None)
+    if not ocpp_handler:
+        raise HTTPException(status_code=500, detail="OCPP handler not available")
+    
+    if ocpp_handler.heartbeat_task and not ocpp_handler.heartbeat_task.done():
+        ocpp_handler.heartbeat_task.cancel()
+        logger.info("Heartbeat monitor stopped")
+        return {"status": "success", "message": "Heartbeat monitor stopped"}
+    else:
+        return {"status": "info", "message": "Heartbeat monitor was not running"}
+
+@router.post("/heartbeat-monitor/start")
+async def start_heartbeat_monitor(request: Request):
+    """Start the heartbeat monitor task"""
+    ocpp_handler = getattr(request.app.state, "ocpp_handler", None)
+    if not ocpp_handler:
+        raise HTTPException(status_code=500, detail="OCPP handler not available")
+    
+    if ocpp_handler.heartbeat_task and not ocpp_handler.heartbeat_task.done():
+        return {"status": "info", "message": "Heartbeat monitor is already running"}
+    else:
+        ocpp_handler.heartbeat_task = asyncio.create_task(ocpp_handler.heartbeat_monitor())
+        logger.info("Heartbeat monitor started")
+        return {"status": "success", "message": "Heartbeat monitor started"}
+
+@router.get("/heartbeat-monitor/status")
+async def get_heartbeat_monitor_status(request: Request):
+    """Get the heartbeat monitor status"""
+    ocpp_handler = getattr(request.app.state, "ocpp_handler", None)
+    if not ocpp_handler:
+        raise HTTPException(status_code=500, detail="OCPP handler not available")
+    
+    is_running = ocpp_handler.heartbeat_task and not ocpp_handler.heartbeat_task.done()
+    return {
+        "status": "running" if is_running else "stopped",
+        "is_running": is_running,
+        "task_exists": ocpp_handler.heartbeat_task is not None
+    }
 
 @router.post("/ocpp/cache/clear", response_model=OCPPResponse)
 async def clear_cache(
