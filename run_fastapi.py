@@ -10,7 +10,7 @@ from app.core.config import settings
 
 # Override ports to avoid conflicts
 os.environ["PORT"] = "8001"
-os.environ["OCPP_WEBSOCKET_PORT"] = "1010"
+os.environ["OCPP_WEBSOCKET_PORT"] = "1025"
 
 if __name__ == "__main__":
     uvicorn.run(

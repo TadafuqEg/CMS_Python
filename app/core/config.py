@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     
     # OCPP configuration
     OCPP_WEBSOCKET_HOST: str = "0.0.0.0"
-    OCPP_WEBSOCKET_PORT: int = 1010
+    OCPP_WEBSOCKET_PORT: int = 1025
     OCPP_SUBPROTOCOLS: List[str] = ["ocpp1.6", "ocpp2.0.1"]
     
     # Message queue configuration

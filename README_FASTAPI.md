@@ -139,7 +139,7 @@ ACCESS_TOKEN_EXPIRE_MINUTES=30
 
 # OCPP WebSocket
 OCPP_WEBSOCKET_HOST=0.0.0.0
-OCPP_WEBSOCKET_PORT=1010
+OCPP_WEBSOCKET_PORT=1025
 
 # Laravel Integration
 LARAVEL_API_URL=http://localhost:8080/api
@@ -219,7 +219,7 @@ curl -H "Authorization: Bearer YOUR_JWT_TOKEN" http://localhost:8000/api/charger
 
 ### Charger Connection
 ```javascript
-const ws = new WebSocket('wss://localhost:1010/ocpp/CP_001', ['ocpp1.6']);
+const ws = new WebSocket('wss://localhost:1025/ocpp/CP_001', ['ocpp1.6']);
 ```
 
 ### Dashboard Connection
@@ -306,7 +306,7 @@ COPY requirements_fastapi.txt .
 RUN pip install -r requirements_fastapi.txt
 
 COPY . .
-EXPOSE 8000 1010
+EXPOSE 8000 1025
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 ```
