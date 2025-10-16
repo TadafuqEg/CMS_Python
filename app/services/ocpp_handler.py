@@ -19,7 +19,6 @@ from websockets.server import WebSocketServerProtocol
 
 from app.models.database import SessionLocal, Charger, Connector, Session as DBSession, MessageLog, ConnectionEvent, SystemConfig
 from app.core.config import settings
-from app.utils.db_retry import db_operation_with_retry, sync_db_operation_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -949,7 +948,8 @@ class OCPPHandler:
     
     def get_retry_config(self, charger_id: str = None):
         """Get retry configuration from database - charger specific or system default"""
-        def _get_config(db):
+        db = SessionLocal()
+        try:
             # Try to get charger-specific retry configuration first
             if charger_id:
                 charger = db.query(Charger).filter(Charger.id == charger_id).first()
@@ -969,22 +969,17 @@ class OCPPHandler:
                 "retry_interval": int(retry_interval_config.value) if retry_interval_config else 5,
                 "retry_enabled": True  # Default to enabled for system config
             }
-        
-        try:
-            return sync_db_operation_with_retry(
-                _get_config,
-                max_retries=2,
-                operation_name=f"get_retry_config for {charger_id or 'system'}"
-            )
         except Exception as e:
             logger.error(f"Failed to get retry configuration: {e}")
             return {"max_retries": 3, "retry_interval": 5, "retry_enabled": True}  # Default fallback
+        finally:
+            db.close()
     
     async def create_or_update_charger_on_connect(self, charger_id: str, websocket: WebSocketServerProtocol):
         """Create charger record with default values when WebSocket connects"""
         logger.info(f"Creating/updating charger {charger_id} on connect")
-        
-        def _create_or_update(db):
+        db = SessionLocal()
+        try:
             charger = db.query(Charger).filter(Charger.id == charger_id).first()
             logger.info(f"Charger {charger_id} exists: {charger is not None}")
             
@@ -1048,21 +1043,19 @@ class OCPPHandler:
                 
                 logger.info(f"Updated existing charger record for {charger_id}")
             
-            return charger
-        
-        try:
-            await db_operation_with_retry(
-                _create_or_update,
-                max_retries=3,
-                operation_name=f"create_or_update_charger_on_connect for {charger_id}"
-            )
+            db.commit()
             logger.info(f"Successfully committed charger {charger_id} to database")
+            
         except Exception as e:
             logger.error(f"Failed to create/update charger {charger_id}: {e}")
+            db.rollback()
+        finally:
+            db.close()
     
     async def update_charger_connection_status(self, charger_id: str, is_connected: bool):
         """Update charger connection status in database"""
-        def _update_status(db):
+        db = SessionLocal()
+        try:
             charger = db.query(Charger).filter(Charger.id == charger_id).first()
             if charger:
                 charger.is_connected = is_connected
@@ -1073,40 +1066,28 @@ class OCPPHandler:
                     charger.disconnect_time = datetime.utcnow()
                     charger.status = "Offline"
                 charger.updated_at = datetime.utcnow()
-            return charger
-        
-        try:
-            await db_operation_with_retry(
-                _update_status,
-                max_retries=3,
-                operation_name=f"update_charger_connection_status for {charger_id}"
-            )
-        except Exception as e:
-            logger.error(f"Failed to update charger connection status for {charger_id}: {e}")
+                db.commit()
+        finally:
+            db.close()
     
     async def update_charger_heartbeat(self, charger_id: str):
         """Update charger heartbeat timestamp"""
-        def _update_heartbeat(db):
+        db = SessionLocal()
+        try:
             charger = db.query(Charger).filter(Charger.id == charger_id).first()
             if charger:
                 charger.last_heartbeat = datetime.utcnow()
                 charger.updated_at = datetime.utcnow()
-            return charger
-        
-        try:
-            await db_operation_with_retry(
-                _update_heartbeat,
-                max_retries=2,
-                operation_name=f"update_charger_heartbeat for {charger_id}"
-            )
-        except Exception as e:
-            logger.error(f"Failed to update charger heartbeat for {charger_id}: {e}")
+                db.commit()
+        finally:
+            db.close()
     
     async def log_message(self, charger_id: str, message_type: str, action: str, message_id: str, 
                          status: str, processing_time: Optional[float], request: Optional[str], 
                          response: Optional[str]):
         """Log OCPP message to database"""
-        def _log_message(db):
+        db = SessionLocal()
+        try:
             log_entry = MessageLog(
                 charger_id=charger_id,
                 message_type=message_type,
@@ -1118,21 +1099,17 @@ class OCPPHandler:
                 processing_time=processing_time
             )
             db.add(log_entry)
-            return log_entry
-        
-        try:
-            await db_operation_with_retry(
-                _log_message,
-                max_retries=2,
-                operation_name=f"log_message for {charger_id}"
-            )
+            db.commit()
         except Exception as e:
-            logger.error(f"Failed to log message for {charger_id}: {e}")
+            logger.error(f"Failed to log message: {e}")
+        finally:
+            db.close()
     
     async def log_connection_event(self, charger_id: str, event_type: str, websocket: WebSocketServerProtocol = None, 
                                   reason: str = None, connection_id: str = None):
         """Log WebSocket connection event to database"""
-        def _log_event(db):
+        db = SessionLocal()
+        try:
             # Extract connection information from websocket if available
             remote_address = None
             user_agent = None
@@ -1176,17 +1153,13 @@ class OCPPHandler:
             )
             
             db.add(event_log)
-            return event_log
-        
-        try:
-            await db_operation_with_retry(
-                _log_event,
-                max_retries=2,
-                operation_name=f"log_connection_event for {charger_id}"
-            )
+            db.commit()
             logger.info(f"Logged {event_type} event for charger {charger_id}")
+            
         except Exception as e:
-            logger.error(f"Failed to log connection event for {charger_id}: {e}")
+            logger.error(f"Failed to log connection event: {e}")
+        finally:
+            db.close()
     
     async def message_processor(self):
         """Background task to process queued messages"""
@@ -1273,7 +1246,8 @@ class OCPPHandler:
                 heartbeat_request_threshold = current_time - timedelta(minutes=5)  # Request heartbeat if no heartbeat in 5 minutes
                 
                 # Check for chargers that haven't sent heartbeat
-                async def _heartbeat_check(db):
+                db = SessionLocal()
+                try:
                     stale_chargers = db.query(Charger).filter(
                         Charger.is_connected == True,
                         Charger.last_heartbeat < timeout_threshold
@@ -1336,18 +1310,12 @@ class OCPPHandler:
                         connection_id = self.connection_ids.get(charger_id)
                         await self.remove_charger_connection(charger_id, connection_id)
                     
-                    return len(stale_chargers), len(stale_websocket_connections)
-                
-                try:
-                    stale_count, websocket_count = await db_operation_with_retry(
-                        _heartbeat_check,
-                        max_retries=2,
-                        operation_name="heartbeat_monitor"
-                    )
-                    if stale_count > 0 or websocket_count > 0:
-                        logger.info(f"Heartbeat monitor: cleaned up {stale_count} stale chargers and {websocket_count} stale WebSocket connections")
-                except Exception as e:
-                    logger.error(f"Error in heartbeat monitor database operation: {e}")
+                    if stale_chargers or stale_websocket_connections:
+                        db.commit()
+                        logger.info(f"Heartbeat monitor: cleaned up {len(stale_chargers)} stale chargers and {len(stale_websocket_connections)} stale WebSocket connections")
+                    
+                finally:
+                    db.close()
                 
             except asyncio.CancelledError:
                 break

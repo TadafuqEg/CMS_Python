@@ -2,57 +2,18 @@
 Database models and initialization
 """
 
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Float, Boolean, Text, ForeignKey, JSON, event
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Float, Boolean, Text, ForeignKey, JSON
 from sqlalchemy.orm import sessionmaker, relationship, declarative_base
 from sqlalchemy.sql import func
 from datetime import datetime
 import json
-import logging
-
-logger = logging.getLogger(__name__)
 
 from app.core.config import settings
 
 # Create database engine
-engine = create_engine(
-    settings.DATABASE_URL, 
-    echo=settings.DEBUG,
-    pool_pre_ping=True,  # Verify connections before use
-    pool_recycle=3600,   # Recycle connections every hour
-    pool_size=5,         # Reduced number of connections to maintain
-    max_overflow=10,     # Additional connections beyond pool_size
-    connect_args={
-        "timeout": 30,   # Connection timeout
-        "check_same_thread": False,  # Allow multi-threading
-    }
-)
+engine = create_engine(settings.DATABASE_URL, echo=settings.DEBUG)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
-
-@event.listens_for(engine, "connect")
-def set_sqlite_pragma(dbapi_connection, connection_record):
-    """Set SQLite pragmas for better concurrency with error handling"""
-    cursor = dbapi_connection.cursor()
-    try:
-        pragmas = [
-            ("PRAGMA journal_mode=WAL", "WAL mode"),
-            ("PRAGMA synchronous=NORMAL", "synchronous mode"),
-            ("PRAGMA cache_size=10000", "cache size"),
-            ("PRAGMA temp_store=MEMORY", "temp store"),
-            ("PRAGMA busy_timeout=30000", "busy timeout"),
-            ("PRAGMA wal_autocheckpoint=1000", "WAL autocheckpoint")
-        ]
-        
-        for pragma, description in pragmas:
-            try:
-                cursor.execute(pragma)
-                logger.debug(f"Successfully set {description}")
-            except Exception as e:
-                logger.warning(f"Failed to set {description}: {e}")
-    except Exception as e:
-        logger.error(f"Error setting SQLite pragmas: {e}")
-    finally:
-        cursor.close()
 
 class Charger(Base):
     """Charger/Charge Point model"""
