@@ -849,20 +849,25 @@ class OCPPHandler:
     async def send_message_to_charger(self, charger_id: str, message: list):
         """Send message to specific charger and track CALL messages"""
         
-        # For CALL messages (type 2), always add to pending_messages first
+        # For CALL messages (type 2), add to pending_messages only if not already exists
         if message[0] == 2:  # CALL
             message_id = message[1]
             action = message[2]
             payload = message[3]
-            pending_msg = PendingMessage(
-                message_id=message_id,
-                charger_id=charger_id,
-                action=action,
-                payload=payload,
-                timestamp=datetime.utcnow()
-            )
-            self.pending_messages[message_id] = pending_msg
-            logger.debug(f"Added pending message {message_id} ({action}) for {charger_id}")
+            
+            # Only create new PendingMessage if one doesn't already exist
+            if message_id not in self.pending_messages:
+                pending_msg = PendingMessage(
+                    message_id=message_id,
+                    charger_id=charger_id,
+                    action=action,
+                    payload=payload,
+                    timestamp=datetime.utcnow()
+                )
+                self.pending_messages[message_id] = pending_msg
+                logger.debug(f"Added pending message {message_id} ({action}) for {charger_id}")
+            else:
+                logger.debug(f"Pending message {message_id} already exists, not creating new one")
         
         if charger_id not in self.charger_connections:
             logger.warning(f"Charger {charger_id} not connected")
