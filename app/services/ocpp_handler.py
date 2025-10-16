@@ -848,6 +848,22 @@ class OCPPHandler:
     
     async def send_message_to_charger(self, charger_id: str, message: list):
         """Send message to specific charger and track CALL messages"""
+        
+        # For CALL messages (type 2), always add to pending_messages first
+        if message[0] == 2:  # CALL
+            message_id = message[1]
+            action = message[2]
+            payload = message[3]
+            pending_msg = PendingMessage(
+                message_id=message_id,
+                charger_id=charger_id,
+                action=action,
+                payload=payload,
+                timestamp=datetime.utcnow()
+            )
+            self.pending_messages[message_id] = pending_msg
+            logger.debug(f"Added pending message {message_id} ({action}) for {charger_id}")
+        
         if charger_id not in self.charger_connections:
             logger.warning(f"Charger {charger_id} not connected")
             
@@ -862,21 +878,6 @@ class OCPPHandler:
 
         websocket = self.charger_connections[charger_id]
         try:
-            # For CALL messages (type 2), add to pending_messages
-            if message[0] == 2:  # CALL
-                message_id = message[1]
-                action = message[2]
-                payload = message[3]
-                pending_msg = PendingMessage(
-                    message_id=message_id,
-                    charger_id=charger_id,
-                    action=action,
-                    payload=payload,
-                    timestamp=datetime.utcnow()
-                )
-                self.pending_messages[message_id] = pending_msg
-                logger.debug(f"Added pending message {message_id} ({action}) for {charger_id}")
-
             await websocket.send(json.dumps(message))
             self.stats["messages_sent"] += 1
             logger.debug(f"Sent message to {charger_id}: {action if message[0] == 2 else 'unknown'}")
@@ -1221,23 +1222,23 @@ class OCPPHandler:
                         if not pending_msg.send_successful:
                             # Previous send failed, retry immediately
                             should_retry = True
-                            logger.debug(f"DEBUG: Retry condition 1 - send_successful=False for {message_id}")
+                            logger.info(f"DEBUG: Retry condition 1 - send_successful=False for {message_id}")
                         elif pending_msg.last_send_attempt:
                             # Check if enough time has passed since last successful send
                             time_since_last_send = (current_time - pending_msg.last_send_attempt).total_seconds()
                             if time_since_last_send >= retry_interval:
                                 should_retry = True
-                                logger.debug(f"DEBUG: Retry condition 2 - time_since_last_send={time_since_last_send}s >= retry_interval={retry_interval}s for {message_id}")
+                                logger.info(f"DEBUG: Retry condition 2 - time_since_last_send={time_since_last_send}s >= retry_interval={retry_interval}s for {message_id}")
                             else:
-                                logger.debug(f"DEBUG: No retry - time_since_last_send={time_since_last_send}s < retry_interval={retry_interval}s for {message_id}")
+                                logger.info(f"DEBUG: No retry - time_since_last_send={time_since_last_send}s < retry_interval={retry_interval}s for {message_id}")
                         else:
-                            logger.debug(f"DEBUG: No retry - no last_send_attempt for {message_id}")
+                            logger.info(f"DEBUG: No retry - no last_send_attempt for {message_id}")
                         
-                        logger.debug(f"DEBUG: should_retry={should_retry} for {message_id}")
+                        logger.info(f"DEBUG: should_retry={should_retry} for {message_id}")
                         
                         if should_retry:
                             logger.info(f"Retrying message {message_id} ({pending_msg.action}) for {pending_msg.charger_id} (attempt {pending_msg.retry_count + 1}/{max_retries}, interval: {retry_interval}s)")
-                            logger.debug(f"DEBUG: Before retry - retry_count={pending_msg.retry_count}, send_successful={pending_msg.send_successful}, last_send_attempt={pending_msg.last_send_attempt}")
+                            logger.info(f"DEBUG: Before retry - retry_count={pending_msg.retry_count}, send_successful={pending_msg.send_successful}, last_send_attempt={pending_msg.last_send_attempt}")
                             # Retry message
                             await self.send_message_to_charger(
                                 pending_msg.charger_id,
@@ -1245,7 +1246,7 @@ class OCPPHandler:
                             )
                             pending_msg.retry_count += 1
                             pending_msg.timestamp = current_time
-                            logger.debug(f"DEBUG: After retry - retry_count={pending_msg.retry_count}, send_successful={pending_msg.send_successful}")
+                            logger.info(f"DEBUG: After retry - retry_count={pending_msg.retry_count}, send_successful={pending_msg.send_successful}")
                 
                 # Remove expired messages
                 for message_id in expired_messages:

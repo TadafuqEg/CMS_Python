@@ -566,20 +566,22 @@ async def set_configuration(
             detail=f"Charger '{charger_id}' has never connected."
         )
 
-    if latest_connection_event.event_type != "CONNECT":
-        raise HTTPException(
-            status_code=400,
-            detail=f"Charger '{charger_id}' is not currently connected. Last event: '{latest_connection_event.event_type}'"
-        )
+    # Allow sending messages to disconnected chargers for retry mechanism testing
+    # if latest_connection_event.event_type != "CONNECT":
+    #     raise HTTPException(
+    #         status_code=400,
+    #         detail=f"Charger '{charger_id}' is not currently connected. Last event: '{latest_connection_event.event_type}'"
+    #     )
 
-    connected_ids = list(ocpp_handler.charger_connections.keys())
-    if charger_id not in connected_ids:
-        # Don't create disconnect event - let OCPP handler manage connection state
-        logger.warning(f"Charger {charger_id} not found in active connections during command")
-        raise HTTPException(
-            status_code=400,
-            detail=f"Charger '{charger_id}' is not currently connected. Please check connection status."
-        )
+    # Allow sending messages to disconnected chargers for retry mechanism testing
+    # connected_ids = list(ocpp_handler.charger_connections.keys())
+    # if charger_id not in connected_ids:
+    #     # Don't create disconnect event - let OCPP handler manage connection state
+    #     logger.warning(f"Charger {charger_id} not found in active connections during command")
+    #     raise HTTPException(
+    #         status_code=400,
+    #         detail=f"Charger '{charger_id}' is not currently connected. Please check connection status."
+    #     )
 
     # Construct OCPP message
     message_id = str(uuid.uuid4())
