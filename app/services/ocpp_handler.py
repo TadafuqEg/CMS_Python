@@ -850,6 +850,14 @@ class OCPPHandler:
         """Send message to specific charger and track CALL messages"""
         if charger_id not in self.charger_connections:
             logger.warning(f"Charger {charger_id} not connected")
+            
+            # Mark send as failed for pending messages
+            if message[0] == 2:  # CALL
+                message_id = message[1]
+                if message_id in self.pending_messages:
+                    self.pending_messages[message_id].send_successful = False
+                    self.pending_messages[message_id].last_send_attempt = datetime.utcnow()
+            
             return False
 
         websocket = self.charger_connections[charger_id]
@@ -884,6 +892,13 @@ class OCPPHandler:
         except Exception as e:
             logger.error(f"Failed to send message to {charger_id}: {e}")
             self.stats["messages_failed"] += 1
+            
+            # Mark send as failed for pending messages
+            if message[0] == 2:  # CALL
+                message_id = message[1]
+                if message_id in self.pending_messages:
+                    self.pending_messages[message_id].send_successful = False
+                    self.pending_messages[message_id].last_send_attempt = datetime.utcnow()
             
             # Clean up stale connection if WebSocket send fails
             logger.warning(f"WebSocket send failed for {charger_id}, cleaning up stale connection")
