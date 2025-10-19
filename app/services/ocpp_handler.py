@@ -479,8 +479,8 @@ class OCPPHandler:
                             charger.is_connected = False
                             db.add(ConnectionEvent(charger_id=charger.id, event_type="timeout", timestamp=datetime.utcnow()))
                             db.commit()
-                        elif (datetime.utcnow() - charger.last_heartbeat).total_seconds() > 300:
-                            await self.send_message_to_charger(charger.id, [2, str(uuid.uuid4()), "Heartbeat", {}])
+                        # Removed heartbeat sending logic - only charging points should send heartbeats
+                        # The central system should only monitor for received heartbeats
                 finally:
                     db.close()
             except asyncio.CancelledError:
