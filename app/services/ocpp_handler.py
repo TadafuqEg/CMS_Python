@@ -128,7 +128,7 @@ class OCPPHandler:
             else:
                 charger.is_connected = True
                 charger.last_heartbeat = datetime.utcnow()
-            db.add(ConnectionEvent(charger_id=charger_id, event_type="connect", timestamp=datetime.utcnow()))
+            db.add(ConnectionEvent(charger_id=charger_id, event_type="CONNECT", timestamp=datetime.utcnow()))
             db.commit()
         finally:
             db.close()
@@ -168,7 +168,7 @@ class OCPPHandler:
                 charger = db.query(Charger).filter(Charger.id == charger_id).first()
                 if charger:
                     charger.is_connected = False
-                db.add(ConnectionEvent(charger_id=charger_id, event_type="disconnect", timestamp=datetime.utcnow()))
+                db.add(ConnectionEvent(charger_id=charger_id, event_type="DISCONNECT", timestamp=datetime.utcnow()))
                 db.commit()
             finally:
                 db.close()
@@ -474,7 +474,7 @@ class OCPPHandler:
                     for charger in chargers:
                         if charger.is_connected and (datetime.utcnow() - charger.last_heartbeat).total_seconds() > 600:
                             charger.is_connected = False
-                            db.add(ConnectionEvent(charger_id=charger.id, event_type="timeout", timestamp=datetime.utcnow()))
+                            db.add(ConnectionEvent(charger_id=charger.id, event_type="TIMEOUT", timestamp=datetime.utcnow()))
                             db.commit()
                         # Removed heartbeat sending logic - only charging points should send heartbeats
                         # The central system should only monitor for received heartbeats
@@ -502,7 +502,7 @@ class OCPPHandler:
                         charger = db.query(Charger).filter(Charger.id == charger_id).first()
                         if charger:
                             charger.is_connected = False
-                        db.add(ConnectionEvent(charger_id=charger_id, event_type="disconnect", timestamp=datetime.utcnow()))
+                        db.add(ConnectionEvent(charger_id=charger_id, event_type="DISCONNECT", timestamp=datetime.utcnow()))
                         db.commit()
                     finally:
                         db.close()
