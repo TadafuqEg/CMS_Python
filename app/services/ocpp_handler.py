@@ -32,6 +32,8 @@ class PendingMessage:
     last_send_attempt: Optional[datetime] = None
     send_successful: bool = False
     callback: Optional[Callable] = None
+    response_received: bool = False  # Track if charging point responded
+    response_timeout: int = 30  # Timeout in seconds to stop retries
 
 class OCPPHandler:
     def __init__(self, session_manager: Optional[SessionManager], mq_bridge: Optional[MQBridge]):
@@ -223,6 +225,41 @@ class OCPPHandler:
                 logger.error(f"Error forwarding message to master: {e}")
 
         self.master_connections -= disconnected_masters
+
+    async def handle_call_result(self, charger_id: str, message_id: str, payload: Dict[str, Any]):
+        """
+        Handle CALLRESULT message from charging point.
+        Mark the pending message as responded.
+        """
+        if message_id in self.pending_messages:
+            self.pending_messages[message_id].response_received = True
+            self.pending_messages.pop(message_id, None)
+            self.stats["pending_messages"] -= 1
+            logger.info(f"Received response for message {message_id} from charger {charger_id}")
+        
+        db = SessionLocal()
+        try:
+            await self.log_message(charger_id, "IN", "CallResult", message_id, "Success", None, None, json.dumps(payload))
+        finally:
+            db.close()
+
+    async def handle_call_error(self, charger_id: str, message_id: str, error_code: str, error_description: str, error_details: Dict[str, Any]):
+        """
+        Handle CALLERROR message from charging point.
+        Mark the pending message as responded.
+        """
+        if message_id in self.pending_messages:
+            self.pending_messages[message_id].response_received = True
+            self.pending_messages.pop(message_id, None)
+            self.stats["pending_messages"] -= 1
+            logger.warning(f"Received error response for message {message_id} from charger {charger_id}: {error_code} - {error_description}")
+        
+        db = SessionLocal()
+        try:
+            error_data = {"errorCode": error_code, "errorDescription": error_description, "errorDetails": error_details}
+            await self.log_message(charger_id, "IN", "CallError", message_id, "Error", None, None, json.dumps(error_data))
+        finally:
+            db.close()
 
     async def handle_charger_message(self, charger_id: str, message: List[Any]):
         self.stats["messages_received"] += 1
@@ -447,12 +484,40 @@ class OCPPHandler:
                     db.close()
 
                 for message_id, pending_msg in list(self.pending_messages.items()):
-                    if pending_msg.send_successful or pending_msg.retry_count >= pending_msg.max_retries:
+                    # Check if charging point has responded - stop retrying
+                    if pending_msg.response_received:
+                        logger.info(f"Message {message_id} received response, removing from retry queue")
                         self.pending_messages.pop(message_id, None)
                         self.stats["pending_messages"] -= 1
                         continue
+                    
+                    # Check if max retries reached - stop retrying
+                    if pending_msg.retry_count >= pending_msg.max_retries:
+                        logger.warning(f"Message {message_id} reached max retries ({pending_msg.max_retries}), stopping retries")
+                        self.pending_messages.pop(message_id, None)
+                        self.stats["pending_messages"] -= 1
+                        continue
+                    
+                    # Check if timeout elapsed - stop retrying
+                    time_elapsed = (datetime.utcnow() - pending_msg.timestamp).total_seconds()
+                    if time_elapsed > pending_msg.response_timeout:
+                        logger.warning(f"Message {message_id} timed out after {pending_msg.response_timeout}s, stopping retries")
+                        self.pending_messages.pop(message_id, None)
+                        self.stats["pending_messages"] -= 1
+                        continue
+                    
+                    # Check if charger is disconnected - stop retrying
+                    if pending_msg.charger_id not in self.charger_connections:
+                        logger.warning(f"Charger {pending_msg.charger_id} is disconnected, stopping retries for message {message_id}")
+                        self.pending_messages.pop(message_id, None)
+                        self.stats["pending_messages"] -= 1
+                        continue
+                    
+                    # Check if retry interval has elapsed
                     if pending_msg.last_send_attempt and (datetime.utcnow() - pending_msg.last_send_attempt).total_seconds() < retry_config["retry_interval"]:
                         continue
+                    
+                    # Retry the message
                     pending_msg.retry_count += 1
                     pending_msg.last_send_attempt = datetime.utcnow()
                     success = await self.send_message_to_charger(charger_id=pending_msg.charger_id, message=[2, message_id, pending_msg.action, pending_msg.payload])
