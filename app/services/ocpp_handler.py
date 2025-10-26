@@ -14,7 +14,7 @@ from fastapi import WebSocket
 from sqlalchemy.orm import Session
 
 from app.models.database import Charger, Connector, Session, MessageLog, ConnectionEvent, SystemConfig, SessionLocal
-from app.core.config import settings
+from app.core.config import settings, create_ssl_context
 from app.services.session_manager import SessionManager
 from app.services.mq_bridge import MQBridge
 
@@ -59,11 +59,8 @@ class OCPPHandler:
         }
 
     async def start_websocket_server(self):
-        ssl_context = None
-        if settings.SSL_CERTFILE and settings.SSL_KEYFILE:
-            import ssl
-            ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            ssl_context.load_cert_chain(certfile=settings.SSL_CERTFILE, keyfile=settings.SSL_KEYFILE)
+        # Use the custom SSL context with specific cipher suite
+        ssl_context = create_ssl_context()
 
         self.server = await websockets.serve(
             self.handle_connection,

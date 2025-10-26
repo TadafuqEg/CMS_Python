@@ -17,7 +17,7 @@ from app.services.ocpp_handler import OCPPHandler
 from app.services.session_manager import SessionManager
 from app.services.mq_bridge import MQBridge
 from app.models.database import init_db
-from app.core.config import settings
+from app.core.config import settings, create_ssl_context, get_uvicorn_ssl_kwargs
 from app.core.security import verify_token
 
 logging.basicConfig(
@@ -140,14 +140,15 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", settings.PORT))
     ws_port = int(os.getenv("OCPP_WEBSOCKET_PORT", settings.OCPP_WEBSOCKET_PORT))
     reload = os.getenv("DEBUG", str(settings.DEBUG)).lower() == "true"
-    ssl_keyfile = os.getenv("SSL_KEYFILE", settings.SSL_KEYFILE)
-    ssl_certfile = os.getenv("SSL_CERTFILE", settings.SSL_CERTFILE)
+    
+    # Get SSL certificate files if available
+    ssl_kwargs = get_uvicorn_ssl_kwargs()
+    
     uvicorn.run(
         "app.main:app",
         host=host,
         port=port,
         reload=reload,
-        ssl_keyfile=ssl_keyfile,
-        ssl_certfile=ssl_certfile,
-        log_level="info"
+        log_level="info",
+        **ssl_kwargs
     )

@@ -3,7 +3,8 @@ Configuration settings for the OCPP Central Management System
 """
 
 import os
-from typing import List
+import ssl
+from typing import List, Optional, Tuple, Dict, Any
 from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
@@ -64,3 +65,92 @@ class Settings(BaseSettings):
 
 # Create settings instance
 settings = Settings()
+
+def create_ssl_context() -> Optional[ssl.SSLContext]:
+    """
+    Create SSL context with specific cipher suite: TLS-ECDHE-RSA-WITH-AES-128-CBC-SHA
+    This corresponds to ECDHE-RSA-AES128-SHA in OpenSSL notation
+    
+    Note: This is used for WebSocket connections
+    """
+    import os
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
+    if not settings.SSL_CERTFILE or not settings.SSL_KEYFILE:
+        logger.info("SSL not enabled - certificate files not configured")
+        return None
+    
+    # Check if certificate files exist
+    if not os.path.exists(settings.SSL_KEYFILE):
+        logger.warning(f"SSL private key file not found: {settings.SSL_KEYFILE}")
+        return None
+    
+    if not os.path.exists(settings.SSL_CERTFILE):
+        logger.warning(f"SSL certificate file not found: {settings.SSL_CERTFILE}")
+        return None
+    
+    try:
+        # Create SSL context
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        
+        # Load certificate and private key
+        context.load_cert_chain(
+            certfile=settings.SSL_CERTFILE,
+            keyfile=settings.SSL_KEYFILE
+        )
+        
+        # Set specific cipher suite TLS-ECDHE-RSA-WITH-AES-128-CBC-SHA
+        # In OpenSSL, this is represented as ECDHE-RSA-AES128-SHA
+        context.set_ciphers('ECDHE-RSA-AES128-SHA')
+        
+        # Set minimum protocol version to TLS 1.0 (required for the specified cipher suite)
+        context.minimum_version = ssl.TLSVersion.MINIMUM_SUPPORTED
+        
+        # Optional: Adjust security settings for development
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        
+        logger.info(f"SSL context created successfully with cipher suite: ECDHE-RSA-AES128-SHA")
+        logger.info(f"  Certificate: {settings.SSL_CERTFILE}")
+        logger.info(f"  Private Key: {settings.SSL_KEYFILE}")
+        
+        return context
+    except ssl.SSLError as e:
+        logger.error(f"SSL error creating context: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Error creating SSL context: {e}")
+        return None
+
+def get_ssl_cert_files() -> Tuple[Optional[str], Optional[str]]:
+    """
+    Get SSL certificate file paths for uvicorn
+    Returns (certfile, keyfile) or (None, None) if not available
+    """
+    import os
+    
+    if not settings.SSL_CERTFILE or not settings.SSL_KEYFILE:
+        return None, None
+    
+    # Check if certificate files exist
+    if not os.path.exists(settings.SSL_KEYFILE) or not os.path.exists(settings.SSL_CERTFILE):
+        return None, None
+    
+    return settings.SSL_CERTFILE, settings.SSL_KEYFILE
+
+def get_uvicorn_ssl_kwargs() -> Dict[str, Any]:
+    """
+    Get SSL keyword arguments for uvicorn.run()
+    Returns a dictionary with ssl_keyfile and ssl_certfile
+    """
+    ssl_certfile, ssl_keyfile = get_ssl_cert_files()
+    
+    kwargs = {}
+    if ssl_keyfile:
+        kwargs['ssl_keyfile'] = ssl_keyfile
+    if ssl_certfile:
+        kwargs['ssl_certfile'] = ssl_certfile
+    
+    return kwargs
