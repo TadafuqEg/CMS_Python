@@ -76,7 +76,7 @@ class OCPPHandler:
             ssl=ssl_context
         )
         self.message_processor_task = asyncio.create_task(self.message_processor())
-        self.retry_task = asyncio.create_task(self.retry_pending_messages())
+        # self.retry_task = asyncio.create_task(self.retry_pending_messages())
         self.heartbeat_task = asyncio.create_task(self.heartbeat_monitor())
         self.keepalive_task = asyncio.create_task(self.keepalive_monitor())
         logger.info(f"OCPP WebSocket server started on {settings.OCPP_WEBSOCKET_HOST}:{settings.OCPP_WEBSOCKET_PORT}")
