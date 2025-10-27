@@ -68,8 +68,11 @@ settings = Settings()
 
 def create_ssl_context() -> Optional[ssl.SSLContext]:
     """
-    Create SSL context with specific cipher suite: TLS-ECDHE-RSA-WITH-AES-128-CBC-SHA
-    This corresponds to ECDHE-RSA-AES128-SHA in OpenSSL notation
+    Create SSL context with cipher suites matching central_system.py
+    Includes TLS-ECDHE-RSA-WITH-AES-128-CBC-SHA and other modern cipher suites
+    
+    Cipher suites: ECDHE-RSA-AES128-SHA:ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM:DHE+CHACHA20:!aNULL:!MD5:!DSS
+    Minimum TLS version: TLSv1_2
     
     Note: This is used for WebSocket connections
     """
@@ -101,20 +104,22 @@ def create_ssl_context() -> Optional[ssl.SSLContext]:
             keyfile=settings.SSL_KEYFILE
         )
         
-        # Set specific cipher suite TLS-ECDHE-RSA-WITH-AES-128-CBC-SHA
-        # In OpenSSL, this is represented as ECDHE-RSA-AES128-SHA
-        context.set_ciphers('ECDHE-RSA-AES128-SHA')
+        # Configure cipher suites to support TLS-ECDHE-RSA-WITH-AES-128-CBC-SHA
+        # Match exactly with central_system.py configuration
+        context.set_ciphers('ECDHE-RSA-AES128-SHA:ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM:DHE+CHACHA20:!aNULL:!MD5:!DSS')
         
-        # Set minimum protocol version to TLS 1.0 (required for the specified cipher suite)
-        context.minimum_version = ssl.TLSVersion.MINIMUM_SUPPORTED
+        # Set minimum TLS version to ensure compatibility
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
         
         # Optional: Adjust security settings for development
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
         
-        logger.info(f"SSL context created successfully with cipher suite: ECDHE-RSA-AES128-SHA")
+        logger.info(f"SSL context created successfully with cipher suites matching central_system.py")
         logger.info(f"  Certificate: {settings.SSL_CERTFILE}")
         logger.info(f"  Private Key: {settings.SSL_KEYFILE}")
+        logger.info(f"  Configured ciphers: {context.get_ciphers()}")
+        logger.info(f"  Minimum TLS version: {context.minimum_version}")
         
         return context
     except ssl.SSLError as e:
