@@ -245,11 +245,16 @@ class OCPPHandler:
         Handle CALLRESULT message from charging point.
         Mark the pending message as responded.
         """
+        action_name = "Unknown"
         if message_id in self.pending_messages:
+            pending = self.pending_messages[message_id]
+            action_name = pending.action
             self.pending_messages[message_id].response_received = True
             self.pending_messages.pop(message_id, None)
             self.stats["pending_messages"] -= 1
-            logger.info(f"Received response for message {message_id} from charger {charger_id}")
+            logger.info(f"Received CALLRESULT for {action_name} (message_id={message_id}) from charger {charger_id}: {payload}")
+        else:
+            logger.info(f"Received CALLRESULT for message {message_id} from charger {charger_id} (not in pending list): {payload}")
         
         db = SessionLocal()
         try:
@@ -262,11 +267,16 @@ class OCPPHandler:
         Handle CALLERROR message from charging point.
         Mark the pending message as responded.
         """
+        action_name = "Unknown"
         if message_id in self.pending_messages:
+            pending = self.pending_messages[message_id]
+            action_name = pending.action
             self.pending_messages[message_id].response_received = True
             self.pending_messages.pop(message_id, None)
             self.stats["pending_messages"] -= 1
-            logger.warning(f"Received error response for message {message_id} from charger {charger_id}: {error_code} - {error_description}")
+            logger.warning(f"Received CALLERROR for {action_name} (message_id={message_id}) from charger {charger_id}: {error_code} - {error_description}")
+        else:
+            logger.warning(f"Received CALLERROR for message {message_id} from charger {charger_id} (not in pending list): {error_code} - {error_description}")
         
         db = SessionLocal()
         try:
