@@ -328,8 +328,8 @@ class OCPPHandler:
                 charger.firmware_version = payload.get("firmwareVersion")
                 db.commit()
             return [3, payload.get("message_id", str(uuid.uuid4())), {
-                "currentTime": datetime.utcnow().isoformat() + "Z",
-                "interval": 300,
+                "currentTime": datetime.now().isoformat(),
+                "interval": 60,
                 "status": "Accepted"
             }]
         finally:
