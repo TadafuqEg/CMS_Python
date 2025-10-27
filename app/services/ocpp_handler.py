@@ -54,6 +54,7 @@ class OCPPHandler:
         self.mq_bridge = mq_bridge
         self.charger_connections: Dict[str, WebSocketServerProtocol] = {}
         self.connection_ids: Dict[str, str] = {}
+        self.transaction_counters: Dict[str, int] = {}  # Track transaction counters per charger
         self.master_connections: Set[WebSocketServerProtocol] = set()
         self.message_queue: asyncio.Queue = asyncio.Queue()
         self.pending_messages: Dict[str, PendingMessage] = {}
@@ -400,6 +401,10 @@ class OCPPHandler:
         try:
             connector_id = payload.get("connectorId", 0)
             transaction_id = payload.get("transactionId")
+            # Ensure transaction_id is an integer
+            if transaction_id is not None:
+                transaction_id = int(transaction_id)
+            
             for meter_value in payload.get("meterValue", []):
                 for sample in meter_value.get("sampledValue", []):
                     if sample.get("measurand") == "Energy.Active.Import.Register":
@@ -422,7 +427,15 @@ class OCPPHandler:
         try:
             connector_id = payload.get("connectorId", 0)
             id_tag = payload.get("idTag")
-            transaction_id = str(uuid.uuid4())
+            
+            # Initialize transaction counter for charger if not exists
+            if charger_id not in self.transaction_counters:
+                self.transaction_counters[charger_id] = 0
+            
+            # Increment and get transaction ID (integer)
+            self.transaction_counters[charger_id] += 1
+            transaction_id = self.transaction_counters[charger_id]
+            
             session = Session(
                 charger_id=charger_id,
                 connector_id=connector_id,
@@ -449,6 +462,10 @@ class OCPPHandler:
         db = SessionLocal()
         try:
             transaction_id = payload.get("transactionId")
+            # Ensure transaction_id is an integer
+            if transaction_id is not None:
+                transaction_id = int(transaction_id)
+            
             session = db.query(Session).filter(Session.transaction_id == transaction_id, Session.charger_id == charger_id).first()
             if session:
                 session.stop_time = datetime.utcnow()
