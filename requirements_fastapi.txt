@@ -23,7 +23,7 @@ aiohttp==3.9.1
 httpx==0.25.2
 
 # OCPP Protocol
-ocpp==0.15.0
+ocpp==2.0.0
 
 # Data Validation
 pydantic==2.5.0
