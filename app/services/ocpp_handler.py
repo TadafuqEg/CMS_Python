@@ -13,8 +13,18 @@ from websockets.server import WebSocketServerProtocol
 from fastapi import WebSocket
 from sqlalchemy.orm import Session
 
+from ocpp.routing import on
 from ocpp.v16 import call_result
-from ocpp.v16.enums import RegistrationStatus
+from ocpp.v16.enums import (
+    RegistrationStatus,
+    AuthorizationStatus,
+    AvailabilityStatus,
+    ConfigurationStatus,
+    ClearCacheStatus,
+    DataTransferStatus,
+    ResetStatus,
+    TriggerMessageStatus,
+)
 
 from app.models.database import Charger, Connector, Session, MessageLog, ConnectionEvent, SystemConfig, SessionLocal
 from app.core.config import settings, create_ssl_context
@@ -295,19 +305,19 @@ class OCPPHandler:
             start_time = time()
             response = None
             if action == "BootNotification":
-                response = await self.handle_boot_notification(charger_id, payload)
+                response = await self.handle_boot_notification(charger_id, message_id, payload)
             elif action == "Heartbeat":
-                response = await self.handle_heartbeat(charger_id, payload)
+                response = await self.handle_heartbeat(charger_id, message_id, payload)
             elif action == "StatusNotification":
-                response = await self.handle_status_notification(charger_id, payload)
+                response = await self.handle_status_notification(charger_id, message_id, payload)
             elif action == "MeterValues":
-                response = await self.handle_meter_values(charger_id, payload)
+                response = await self.handle_meter_values(charger_id, message_id, payload)
             elif action == "StartTransaction":
-                response = await self.handle_start_transaction(charger_id, payload)
+                response = await self.handle_start_transaction(charger_id, message_id, payload)
             elif action == "StopTransaction":
-                response = await self.handle_stop_transaction(charger_id, payload)
+                response = await self.handle_stop_transaction(charger_id, message_id, payload)
             elif action == "Authorize":
-                response = await self.handle_authorize(charger_id, payload)
+                response = await self.handle_authorize(charger_id, message_id, payload)
             else:
                 response = [4, message_id, "NotImplemented", f"Action {action} not supported", {}]
                 self.stats["messages_failed"] += 1
@@ -320,7 +330,7 @@ class OCPPHandler:
         finally:
             db.close()
 
-    async def handle_boot_notification(self, charger_id: str, payload: Dict[str, Any]) -> List[Any]:
+    async def handle_boot_notification(self, charger_id: str, message_id: str, payload: Dict[str, Any]) -> List[Any]:
         db = SessionLocal()
         try:
             charger = db.query(Charger).filter(Charger.id == charger_id).first()
@@ -342,24 +352,29 @@ class OCPPHandler:
             boot_response_dict = asdict(boot_response)
             
             # Return in OCPP message format [3, message_id, payload_dict]
-            return [3, payload.get("message_id", str(uuid.uuid4())), boot_response_dict]
+            return [3, message_id, boot_response_dict]
         finally:
             db.close()
 
-    async def handle_heartbeat(self, charger_id: str, payload: Dict[str, Any]) -> List[Any]:
+    async def handle_heartbeat(self, charger_id: str, message_id: str, payload: Dict[str, Any]) -> List[Any]:
         db = SessionLocal()
         try:
             charger = db.query(Charger).filter(Charger.id == charger_id).first()
             if charger:
                 charger.last_heartbeat = datetime.utcnow()
                 db.commit()
-            return [3, payload.get("message_id", str(uuid.uuid4())), {
-                "currentTime": datetime.utcnow().isoformat() + "Z"
-            }]
+            
+            # Create proper HeartbeatPayload using OCPP library
+            heartbeat_response = call_result.HeartbeatPayload(
+                current_time=datetime.now().isoformat()
+            )
+            heartbeat_dict = asdict(heartbeat_response)
+            
+            return [3, message_id, heartbeat_dict]
         finally:
             db.close()
 
-    async def handle_status_notification(self, charger_id: str, payload: Dict[str, Any]) -> List[Any]:
+    async def handle_status_notification(self, charger_id: str, message_id: str, payload: Dict[str, Any]) -> List[Any]:
         db = SessionLocal()
         try:
             connector_id = payload.get("connectorId", 0)
@@ -371,11 +386,16 @@ class OCPPHandler:
                 connector.error_code = error_code
                 connector.last_updated = datetime.utcnow()
                 db.commit()
-            return [3, payload.get("message_id", str(uuid.uuid4())), {}]
+            
+            # Create proper StatusNotificationPayload using OCPP library (empty dict)
+            status_response = call_result.StatusNotificationPayload()
+            status_dict = asdict(status_response)
+            
+            return [3, message_id, status_dict]
         finally:
             db.close()
 
-    async def handle_meter_values(self, charger_id: str, payload: Dict[str, Any]) -> List[Any]:
+    async def handle_meter_values(self, charger_id: str, message_id: str, payload: Dict[str, Any]) -> List[Any]:
         db = SessionLocal()
         try:
             connector_id = payload.get("connectorId", 0)
@@ -388,11 +408,16 @@ class OCPPHandler:
                             connector.energy_delivered = float(sample.get("value", 0)) / 1000
                             connector.last_updated = datetime.utcnow()
                             db.commit()
-            return [3, payload.get("message_id", str(uuid.uuid4())), {}]
+            
+            # Create proper MeterValuesPayload using OCPP library (empty dict)
+            meter_response = call_result.MeterValuesPayload()
+            meter_dict = asdict(meter_response)
+            
+            return [3, message_id, meter_dict]
         finally:
             db.close()
 
-    async def handle_start_transaction(self, charger_id: str, payload: Dict[str, Any]) -> List[Any]:
+    async def handle_start_transaction(self, charger_id: str, message_id: str, payload: Dict[str, Any]) -> List[Any]:
         db = SessionLocal()
         try:
             connector_id = payload.get("connectorId", 0)
@@ -408,14 +433,19 @@ class OCPPHandler:
             )
             db.add(session)
             db.commit()
-            return [3, payload.get("message_id", str(uuid.uuid4())), {
-                "transactionId": transaction_id,
-                "idTagInfo": {"status": "Accepted"}
-            }]
+            
+            # Create proper StartTransactionPayload using OCPP library
+            start_response = call_result.StartTransactionPayload(
+                transaction_id=transaction_id,
+                id_tag_info={'status': AuthorizationStatus.accepted}
+            )
+            start_dict = asdict(start_response)
+            
+            return [3, message_id, start_dict]
         finally:
             db.close()
 
-    async def handle_stop_transaction(self, charger_id: str, payload: Dict[str, Any]) -> List[Any]:
+    async def handle_stop_transaction(self, charger_id: str, message_id: str, payload: Dict[str, Any]) -> List[Any]:
         db = SessionLocal()
         try:
             transaction_id = payload.get("transactionId")
@@ -426,16 +456,25 @@ class OCPPHandler:
                 session.energy_delivered = (session.meter_stop - session.meter_start) / 1000 if session.meter_start and session.meter_stop else 0
                 session.status = "Completed"
                 db.commit()
-            return [3, payload.get("message_id", str(uuid.uuid4())), {
-                "idTagInfo": {"status": "Accepted"}
-            }]
+            
+            # Create proper StopTransactionPayload using OCPP library
+            stop_response = call_result.StopTransactionPayload(
+                id_tag_info={'status': AuthorizationStatus.accepted}
+            )
+            stop_dict = asdict(stop_response)
+            
+            return [3, message_id, stop_dict]
         finally:
             db.close()
 
-    async def handle_authorize(self, charger_id: str, payload: Dict[str, Any]) -> List[Any]:
-        return [3, payload.get("message_id", str(uuid.uuid4())), {
-            "idTagInfo": {"status": "Accepted"}
-        }]
+    async def handle_authorize(self, charger_id: str, message_id: str, payload: Dict[str, Any]) -> List[Any]:
+        # Create proper AuthorizePayload using OCPP library
+        authorize_response = call_result.AuthorizePayload(
+            id_tag_info={'status': AuthorizationStatus.accepted}
+        )
+        authorize_dict = asdict(authorize_response)
+        
+        return [3, message_id, authorize_dict]
 
     async def send_message_to_charger(self, charger_id: str, message: List[Any], processing_time: float = 0.0) -> bool:
         ws = self.charger_connections.get(charger_id)
