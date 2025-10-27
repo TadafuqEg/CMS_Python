@@ -248,7 +248,7 @@ class OCPPHandler:
     async def handle_call_result(self, charger_id: str, message_id: str, payload: Dict[str, Any]):
         """
         Handle CALLRESULT message from charging point.
-        Mark the pending message as responded.
+        Mark the pending message as responded and route to specific handler if available.
         """
         action_name = "Unknown"
         if message_id in self.pending_messages:
@@ -258,14 +258,40 @@ class OCPPHandler:
             self.pending_messages.pop(message_id, None)
             self.stats["pending_messages"] -= 1
             logger.info(f"Received CALLRESULT for {action_name} (message_id={message_id}) from charger {charger_id}: {payload}")
+            
+            # Route to specific handler based on action type
+            await self.handle_specific_call_result(charger_id, action_name, message_id, payload)
         else:
             logger.info(f"Received CALLRESULT for message {message_id} from charger {charger_id} (not in pending list): {payload}")
-        
         db = SessionLocal()
         try:
             await self.log_message(charger_id, "IN", "CallResult", message_id, "Success", None, None, json.dumps(payload))
         finally:
             db.close()
+    
+    async def handle_specific_call_result(self, charger_id: str, action: str, message_id: str, payload: Dict[str, Any]):
+        """Route CALLRESULT to specific handler based on action type"""
+        handler_map = {
+            "ChangeAvailability": self.on_change_availability_response,
+            "ChangeConfiguration": self.on_change_configuration_response,
+            "ClearCache": self.on_clear_cache_response,
+            "ClearChargingProfile": self.on_clear_charging_profile_response,
+            "GetConfiguration": self.on_get_configuration_response,
+            "GetDiagnostics": self.on_get_diagnostics_response,
+            "GetLocalListVersion": self.on_get_local_list_version_response,
+            "RemoteStartTransaction": self.on_remote_start_transaction_response,
+            "RemoteStopTransaction": self.on_remote_stop_transaction_response,
+            "Reset": self.on_reset_response,
+            "SendLocalList": self.on_send_local_list_response,
+            "SetChargingProfile": self.on_set_charging_profile_response,
+            "TriggerMessage": self.on_trigger_message_response,
+            "UnlockConnector": self.on_unlock_connector_response,
+            "UpdateFirmware": self.on_update_firmware_response,
+        }
+        
+        handler = handler_map.get(action)
+        if handler:
+            await handler(charger_id, message_id, payload)
 
     async def handle_call_error(self, charger_id: str, message_id: str, error_code: str, error_description: str, error_details: Dict[str, Any]):
         """
@@ -695,6 +721,82 @@ class OCPPHandler:
         response_dict = asdict(response)
         
         return [3, message_id, response_dict]
+
+    # Response handlers for CS → CP messages
+    async def on_change_availability_response(self, charger_id: str, message_id: str, payload: Dict[str, Any]):
+        """Handle response to ChangeAvailability command"""
+        status = payload.get("status")
+        logger.info(f"ChangeAvailability response from {charger_id}: status={status}")
+
+    async def on_change_configuration_response(self, charger_id: str, message_id: str, payload: Dict[str, Any]):
+        """Handle response to ChangeConfiguration command"""
+        status = payload.get("status")
+        logger.info(f"ChangeConfiguration response from {charger_id}: status={status}")
+
+    async def on_clear_cache_response(self, charger_id: str, message_id: str, payload: Dict[str, Any]):
+        """Handle response to ClearCache command"""
+        status = payload.get("status")
+        logger.info(f"ClearCache response from {charger_id}: status={status}")
+
+    async def on_clear_charging_profile_response(self, charger_id: str, message_id: str, payload: Dict[str, Any]):
+        """Handle response to ClearChargingProfile command"""
+        status = payload.get("status")
+        logger.info(f"ClearChargingProfile response from {charger_id}: status={status}")
+
+    async def on_get_configuration_response(self, charger_id: str, message_id: str, payload: Dict[str, Any]):
+        """Handle response to GetConfiguration command"""
+        configuration_key = payload.get("configurationKey")
+        unknown_key = payload.get("unknownKey")
+        logger.info(f"GetConfiguration response from {charger_id}: keys={len(configuration_key or [])}, unknown={len(unknown_key or [])}")
+
+    async def on_get_diagnostics_response(self, charger_id: str, message_id: str, payload: Dict[str, Any]):
+        """Handle response to GetDiagnostics command"""
+        file_name = payload.get("fileName")
+        logger.info(f"GetDiagnostics response from {charger_id}: fileName={file_name}")
+
+    async def on_get_local_list_version_response(self, charger_id: str, message_id: str, payload: Dict[str, Any]):
+        """Handle response to GetLocalListVersion command"""
+        list_version = payload.get("listVersion")
+        logger.info(f"GetLocalListVersion response from {charger_id}: version={list_version}")
+
+    async def on_remote_start_transaction_response(self, charger_id: str, message_id: str, payload: Dict[str, Any]):
+        """Handle response to RemoteStartTransaction command"""
+        status = payload.get("status")
+        logger.info(f"RemoteStartTransaction response from {charger_id}: status={status}")
+
+    async def on_remote_stop_transaction_response(self, charger_id: str, message_id: str, payload: Dict[str, Any]):
+        """Handle response to RemoteStopTransaction command"""
+        status = payload.get("status")
+        logger.info(f"RemoteStopTransaction response from {charger_id}: status={status}")
+
+    async def on_reset_response(self, charger_id: str, message_id: str, payload: Dict[str, Any]):
+        """Handle response to Reset command"""
+        status = payload.get("status")
+        logger.info(f"Reset response from {charger_id}: status={status}")
+
+    async def on_send_local_list_response(self, charger_id: str, message_id: str, payload: Dict[str, Any]):
+        """Handle response to SendLocalList command"""
+        status = payload.get("status")
+        logger.info(f"SendLocalList response from {charger_id}: status={status}")
+
+    async def on_set_charging_profile_response(self, charger_id: str, message_id: str, payload: Dict[str, Any]):
+        """Handle response to SetChargingProfile command"""
+        status = payload.get("status")
+        logger.info(f"SetChargingProfile response from {charger_id}: status={status}")
+
+    async def on_trigger_message_response(self, charger_id: str, message_id: str, payload: Dict[str, Any]):
+        """Handle response to TriggerMessage command"""
+        status = payload.get("status")
+        logger.info(f"TriggerMessage response from {charger_id}: status={status}")
+
+    async def on_unlock_connector_response(self, charger_id: str, message_id: str, payload: Dict[str, Any]):
+        """Handle response to UnlockConnector command"""
+        status = payload.get("status")
+        logger.info(f"UnlockConnector response from {charger_id}: status={status}")
+
+    async def on_update_firmware_response(self, charger_id: str, message_id: str, payload: Dict[str, Any]):
+        """Handle response to UpdateFirmware command"""
+        logger.info(f"UpdateFirmware response from {charger_id}")
 
     async def send_message_to_charger(self, charger_id: str, message: List[Any], processing_time: float = 0.0) -> bool:
         ws = self.charger_connections.get(charger_id)
