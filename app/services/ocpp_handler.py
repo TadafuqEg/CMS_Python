@@ -24,6 +24,9 @@ from ocpp.v16.enums import (
     DataTransferStatus,
     ResetStatus,
     TriggerMessageStatus,
+    DiagnosticsStatus,
+    FirmwareStatus,
+    GetCompositeScheduleStatus,
 )
 
 from app.models.database import Charger, Connector, Session, MessageLog, ConnectionEvent, SystemConfig, SessionLocal
@@ -337,6 +340,12 @@ class OCPPHandler:
                 response = await self.handle_boot_notification(charger_id, message_id, payload)
             elif action == "DataTransfer":
                 response = await self.handle_data_transfer(charger_id, message_id, payload)
+            elif action == "DiagnosticsStatusNotification":
+                response = await self.handle_diagnostics_status_notification(charger_id, message_id, payload)
+            elif action == "FirmwareStatusNotification":
+                response = await self.handle_firmware_status_notification(charger_id, message_id, payload)
+            elif action == "GetCompositeSchedule":
+                response = await self.handle_get_composite_schedule(charger_id, message_id, payload)
             elif action == "Heartbeat":
                 response = await self.handle_heartbeat(charger_id, message_id, payload)
             elif action == "MeterValues":
@@ -546,6 +555,52 @@ class OCPPHandler:
         data_transfer_dict = asdict(data_transfer_response)
         
         return [3, message_id, data_transfer_dict]
+
+    async def handle_diagnostics_status_notification(self, charger_id: str, message_id: str, payload: Dict[str, Any]) -> List[Any]:
+        """Handle DiagnosticsStatusNotification message from charger"""
+        status = payload.get("status")
+        logger.info(f"Received DiagnosticsStatusNotification from {charger_id}: status={status}")
+        
+        response = call_result.DiagnosticsStatusNotificationPayload()
+        response_dict = asdict(response)
+        
+        return [3, message_id, response_dict]
+
+    async def handle_firmware_status_notification(self, charger_id: str, message_id: str, payload: Dict[str, Any]) -> List[Any]:
+        """Handle FirmwareStatusNotification message from charger"""
+        status = payload.get("status")
+        logger.info(f"Received FirmwareStatusNotification from {charger_id}: status={status}")
+        
+        response = call_result.FirmwareStatusNotificationPayload()
+        response_dict = asdict(response)
+        
+        return [3, message_id, response_dict]
+
+    async def handle_get_composite_schedule(self, charger_id: str, message_id: str, payload: Dict[str, Any]) -> List[Any]:
+        """Handle GetCompositeSchedule message from charger"""
+        connector_id = payload.get("connectorId")
+        duration = payload.get("duration")
+        charging_rate_unit = payload.get("chargingRateUnit")
+        
+        logger.info(f"Received GetCompositeSchedule from {charger_id}: connector_id={connector_id}, duration={duration}")
+        
+        response = call_result.GetCompositeSchedulePayload(
+            status=GetCompositeScheduleStatus.accepted,
+            connector_id=connector_id,
+            schedule_start=datetime.now().isoformat(),
+            charging_schedule={
+                "chargingRateUnit": charging_rate_unit or "W",
+                "chargingSchedulePeriod": [
+                    {
+                        "startPeriod": 0,
+                        "limit": 10000  # 10 kW
+                    }
+                ]
+            }
+        )
+        response_dict = asdict(response)
+        
+        return [3, message_id, response_dict]
 
     async def send_message_to_charger(self, charger_id: str, message: List[Any], processing_time: float = 0.0) -> bool:
         ws = self.charger_connections.get(charger_id)
