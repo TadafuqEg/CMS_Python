@@ -719,14 +719,14 @@ async def main():
                 if path.startswith('/master') 
                 else handle_client_connection(ws, path)
             ),
-            "localhost",
+            "0.0.0.0",
             9000,
             subprotocols=["ocpp1.6"],
             ssl=ssl_context  # Add SSL context for WSS
         ):
-            logging.info("OCPP 1.6 server running on wss://localhost:9000")
-            logging.info("Regular clients connect to: wss://localhost:9000/{charge_point_id}")
-            logging.info("Master connections connect to: wss://localhost:9000/master")
+            logging.info("OCPP 1.6 server running on wss://0.0.0.0:9000")
+            logging.info("Regular clients connect to: wss://0.0.0.0:9000/{charge_point_id}")
+            logging.info("Master connections connect to: wss://0.0.0.0:9000/master")
             await asyncio.Future()  # Run forever
     except Exception as e:
         logging.error(f"Server failed: {e}")
