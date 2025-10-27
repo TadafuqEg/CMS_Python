@@ -329,6 +329,8 @@ class OCPPHandler:
         - GetCompositeSchedule: Request composite charging schedule
         - Heartbeat: Connection keep-alive
         - MeterValues: Energy consumption data
+        - RemoteStartTransaction: Remote start charging request
+        - RemoteStopTransaction: Remote stop charging request
         - ReserveNow: Reserve a connector
         - StartTransaction: Begin charging session
         - StatusNotification: Status changes
@@ -362,6 +364,10 @@ class OCPPHandler:
                 response = await self.handle_get_composite_schedule(charger_id, message_id, payload)
             elif action == "Heartbeat":
                 response = await self.handle_heartbeat(charger_id, message_id, payload)
+            elif action == "RemoteStartTransaction":
+                response = await self.handle_remote_start_transaction(charger_id, message_id, payload)
+            elif action == "RemoteStopTransaction":
+                response = await self.handle_remote_stop_transaction(charger_id, message_id, payload)
             elif action == "ReserveNow":
                 response = await self.handle_reserve_now(charger_id, message_id, payload)
             elif action == "MeterValues":
@@ -615,6 +621,31 @@ class OCPPHandler:
                     }
                 ]
             }
+        )
+        response_dict = asdict(response)
+        
+        return [3, message_id, response_dict]
+
+    async def handle_remote_start_transaction(self, charger_id: str, message_id: str, payload: Dict[str, Any]) -> List[Any]:
+        """Handle RemoteStartTransaction message from charger"""
+        id_tag = payload.get("idTag")
+        connector_id = payload.get("connectorId")
+        logger.info(f"Received RemoteStartTransaction from {charger_id}: id_tag={id_tag}, connector_id={connector_id}")
+        
+        response = call_result.RemoteStartTransactionPayload(
+            status=AuthorizationStatus.accepted
+        )
+        response_dict = asdict(response)
+        
+        return [3, message_id, response_dict]
+
+    async def handle_remote_stop_transaction(self, charger_id: str, message_id: str, payload: Dict[str, Any]) -> List[Any]:
+        """Handle RemoteStopTransaction message from charger"""
+        transaction_id = payload.get("transactionId")
+        logger.info(f"Received RemoteStopTransaction from {charger_id}: transaction_id={transaction_id}")
+        
+        response = call_result.RemoteStopTransactionPayload(
+            status=AuthorizationStatus.accepted
         )
         response_dict = asdict(response)
         
