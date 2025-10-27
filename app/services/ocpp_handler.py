@@ -38,6 +38,26 @@ from app.services.mq_bridge import MQBridge
 
 logger = logging.getLogger(__name__)
 
+def to_camel_case(snake_str: str) -> str:
+    """Convert snake_case to camelCase"""
+    components = snake_str.split('_')
+    return components[0] + ''.join(x.capitalize() for x in components[1:])
+
+def dict_to_camelcase(data: Any) -> Any:
+    """Recursively convert dictionary keys from snake_case to camelCase"""
+    if isinstance(data, dict):
+        return {to_camel_case(k): dict_to_camelcase(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [dict_to_camelcase(item) for item in data]
+    elif isinstance(data, datetime):
+        return data.isoformat()
+    else:
+        return data
+
+def asdict_camelcase(obj) -> Dict[str, Any]:
+    """Convert dataclass to dict with camelCase keys"""
+    return dict_to_camelcase(asdict(obj))
+
 @dataclass
 class PendingMessage:
     message_id: str
@@ -258,7 +278,7 @@ class OCPPHandler:
             self.pending_messages.pop(message_id, None)
             self.stats["pending_messages"] -= 1
             logger.info(f"Received CALLRESULT for {action_name} (message_id={message_id}) from charger {charger_id}: {payload}")
-            
+        
             # Route to specific handler based on action type
             await self.handle_specific_call_result(charger_id, action_name, message_id, payload)
         else:
@@ -438,8 +458,8 @@ class OCPPHandler:
                 status=RegistrationStatus.accepted
             )
             
-            # Convert dataclass to dict for JSON serialization
-            boot_response_dict = asdict(boot_response)
+            # Convert dataclass to dict with camelCase keys for JSON serialization
+            boot_response_dict = asdict_camelcase(boot_response)
             
             # Return in OCPP message format [3, message_id, payload_dict]
             return [3, message_id, boot_response_dict]
@@ -458,7 +478,7 @@ class OCPPHandler:
             heartbeat_response = call_result.HeartbeatPayload(
                 current_time=datetime.now().isoformat()
             )
-            heartbeat_dict = asdict(heartbeat_response)
+            heartbeat_dict = asdict_camelcase(heartbeat_response)
             
             return [3, message_id, heartbeat_dict]
         finally:
@@ -479,7 +499,7 @@ class OCPPHandler:
             
             # Create proper StatusNotificationPayload using OCPP library (empty dict)
             status_response = call_result.StatusNotificationPayload()
-            status_dict = asdict(status_response)
+            status_dict = asdict_camelcase(status_response)
             
             return [3, message_id, status_dict]
         finally:
@@ -505,7 +525,7 @@ class OCPPHandler:
             
             # Create proper MeterValuesPayload using OCPP library (empty dict)
             meter_response = call_result.MeterValuesPayload()
-            meter_dict = asdict(meter_response)
+            meter_dict = asdict_camelcase(meter_response)
             
             return [3, message_id, meter_dict]
         finally:
@@ -541,7 +561,7 @@ class OCPPHandler:
                 transaction_id=transaction_id,
                 id_tag_info={'status': AuthorizationStatus.accepted}
             )
-            start_dict = asdict(start_response)
+            start_dict = asdict_camelcase(start_response)
             
             return [3, message_id, start_dict]
         finally:
@@ -567,7 +587,7 @@ class OCPPHandler:
             stop_response = call_result.StopTransactionPayload(
                 id_tag_info={'status': AuthorizationStatus.accepted}
             )
-            stop_dict = asdict(stop_response)
+            stop_dict = asdict_camelcase(stop_response)
             
             return [3, message_id, stop_dict]
         finally:
@@ -578,7 +598,7 @@ class OCPPHandler:
         authorize_response = call_result.AuthorizePayload(
             id_tag_info={'status': AuthorizationStatus.accepted}
         )
-        authorize_dict = asdict(authorize_response)
+        authorize_dict = asdict_camelcase(authorize_response)
         
         return [3, message_id, authorize_dict]
 
@@ -604,7 +624,7 @@ class OCPPHandler:
         data_transfer_response = call_result.DataTransferPayload(
             status=DataTransferStatus.accepted
         )
-        data_transfer_dict = asdict(data_transfer_response)
+        data_transfer_dict = asdict_camelcase(data_transfer_response)
         
         return [3, message_id, data_transfer_dict]
 
@@ -614,7 +634,7 @@ class OCPPHandler:
         logger.info(f"Received DiagnosticsStatusNotification from {charger_id}: status={status}")
         
         response = call_result.DiagnosticsStatusNotificationPayload()
-        response_dict = asdict(response)
+        response_dict = asdict_camelcase(response)
         
         return [3, message_id, response_dict]
 
@@ -624,7 +644,7 @@ class OCPPHandler:
         logger.info(f"Received FirmwareStatusNotification from {charger_id}: status={status}")
         
         response = call_result.FirmwareStatusNotificationPayload()
-        response_dict = asdict(response)
+        response_dict = asdict_camelcase(response)
         
         return [3, message_id, response_dict]
 
@@ -650,7 +670,7 @@ class OCPPHandler:
                 ]
             }
         )
-        response_dict = asdict(response)
+        response_dict = asdict_camelcase(response)
         
         return [3, message_id, response_dict]
 
@@ -663,7 +683,7 @@ class OCPPHandler:
         response = call_result.RemoteStartTransactionPayload(
             status=AuthorizationStatus.accepted
         )
-        response_dict = asdict(response)
+        response_dict = asdict_camelcase(response)
         
         return [3, message_id, response_dict]
 
@@ -687,7 +707,7 @@ class OCPPHandler:
         response = call_result.CancelReservationPayload(
             status=CancelReservationStatus.accepted
         )
-        response_dict = asdict(response)
+        response_dict = asdict_camelcase(response)
         
         return [3, message_id, response_dict]
 
@@ -703,7 +723,7 @@ class OCPPHandler:
         response = call_result.ReserveNowPayload(
             status=ReservationStatus.accepted
         )
-        response_dict = asdict(response)
+        response_dict = asdict_camelcase(response)
         
         return [3, message_id, response_dict]
 
@@ -720,7 +740,7 @@ class OCPPHandler:
         response = call_result.TriggerMessagePayload(
             status=TriggerMessageStatus.accepted
         )
-        response_dict = asdict(response)
+        response_dict = asdict_camelcase(response)
         
         return [3, message_id, response_dict]
 
