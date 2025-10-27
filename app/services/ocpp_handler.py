@@ -13,6 +13,9 @@ from websockets.server import WebSocketServerProtocol
 from fastapi import WebSocket
 from sqlalchemy.orm import Session
 
+from ocpp.v16 import call_result
+from ocpp.v16.enums import RegistrationStatus
+
 from app.models.database import Charger, Connector, Session, MessageLog, ConnectionEvent, SystemConfig, SessionLocal
 from app.core.config import settings, create_ssl_context
 from app.services.session_manager import SessionManager
@@ -321,19 +324,25 @@ class OCPPHandler:
         db = SessionLocal()
         try:
             charger = db.query(Charger).filter(Charger.id == charger_id).first()
-            gmt_plus_3 = timezone(timedelta(hours=3))
             if charger:
                 charger.vendor = payload.get("chargePointVendor")
                 charger.model = payload.get("chargePointModel")
                 charger.serial_number = payload.get("chargePointSerialNumber")
                 charger.firmware_version = payload.get("firmwareVersion")
                 db.commit()
-            return [3, payload.get("message_id", str(uuid.uuid4())), {
-                
-                "currentTime": datetime.now(gmt_plus_3).replace(tzinfo=None).isoformat(),
-                "interval": 60,
-                "status": "Accepted"
-            }]
+            
+            # Create proper BootNotificationPayload using OCPP library
+            boot_response = call_result.BootNotificationPayload(
+                current_time=datetime.now().isoformat(),
+                interval=60,
+                status=RegistrationStatus.accepted
+            )
+            
+            # Convert dataclass to dict for JSON serialization
+            boot_response_dict = asdict(boot_response)
+            
+            # Return in OCPP message format [3, message_id, payload_dict]
+            return [3, payload.get("message_id", str(uuid.uuid4())), boot_response_dict]
         finally:
             db.close()
 
