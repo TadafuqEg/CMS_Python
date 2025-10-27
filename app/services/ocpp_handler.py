@@ -2,7 +2,7 @@ import asyncio
 import json
 import uuid
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Optional, List, Set, Any, Callable
 from dataclasses import dataclass, asdict
 from time import time
@@ -321,6 +321,7 @@ class OCPPHandler:
         db = SessionLocal()
         try:
             charger = db.query(Charger).filter(Charger.id == charger_id).first()
+            gmt_plus_3 = timezone(timedelta(hours=3))
             if charger:
                 charger.vendor = payload.get("chargePointVendor")
                 charger.model = payload.get("chargePointModel")
@@ -328,7 +329,8 @@ class OCPPHandler:
                 charger.firmware_version = payload.get("firmwareVersion")
                 db.commit()
             return [3, payload.get("message_id", str(uuid.uuid4())), {
-                "currentTime": datetime.now().isoformat(),
+                
+                "currentTime": datetime.now(gmt_plus_3).isoformat(),
                 "interval": 60,
                 "status": "Accepted"
             }]
