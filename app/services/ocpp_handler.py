@@ -410,8 +410,10 @@ class OCPPHandler:
                 response = [4, message_id, "NotImplemented", f"Action {action} not supported", {}]
                 self.stats["messages_failed"] += 1
 
-            if self.session_manager:
-                await self.session_manager.handle_ocpp_message(charger_id, action, payload, response)
+            if self.session_manager and response:
+                # Extract payload dict from response [3, message_id, payload_dict]
+                response_payload = response[2] if len(response) > 2 and isinstance(response, list) else response
+                await self.session_manager.handle_ocpp_message(charger_id, action, payload, response_payload)
             await self.log_message(charger_id, "IN", action, message_id, "Success" if response and response[0] != 4 else "Error",
                                   time() - start_time, json.dumps(payload), json.dumps(response) if response else None)
             return response
