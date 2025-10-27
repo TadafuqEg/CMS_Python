@@ -278,6 +278,31 @@ class SendLocalListRequest(BaseModel):
     def validate_authorization_entry(cls, v):
         return v
 
+class GetDiagnosticsRequest(BaseModel):
+    charger_id: str
+    location: str = Field(..., description="Location (URL) where diagnostics should be uploaded")
+    start_time: Optional[datetime] = Field(None, description="Start of diagnostics period")
+    stop_time: Optional[datetime] = Field(None, description="Stop of diagnostics period")
+    retries: Optional[int] = Field(None, ge=0, le=10, description="Number of retries")
+    retry_interval: Optional[int] = Field(None, ge=0, description="Retry interval in seconds")
+
+class ClearChargingProfileRequest(BaseModel):
+    charger_id: str
+    connector_id: Optional[int] = Field(None, description="Connector ID (optional)")
+    charging_profile_id: Optional[int] = Field(None, description="Charging profile ID to clear (optional)")
+
+class SetChargingProfileRequest(BaseModel):
+    charger_id: str
+    connector_id: int = Field(..., ge=0, description="Connector ID")
+    charging_profile: Dict[str, Any] = Field(..., description="Charging profile configuration")
+
+class UpdateFirmwareRequest(BaseModel):
+    charger_id: str
+    location: str = Field(..., description="Location (URL) where firmware can be downloaded")
+    retrieve_date: datetime = Field(..., description="Date and time at which the firmware should be retrieved")
+    retries: Optional[int] = Field(None, ge=0, le=10, description="Number of retries")
+    retry_interval: Optional[int] = Field(None, ge=0, description="Retry interval in seconds")
+
 
 @router.post("/ocpp/remote/start", response_model=OCPPResponse)
 async def remote_start_transaction(
@@ -1307,6 +1332,188 @@ async def get_local_list_version(
         message_id=message_id,
         message=f"GetLocalListVersion command sent to charger {charger_id}"
     )
+
+@router.post("/ocpp/diagnostics/get", response_model=OCPPResponse)
+async def get_diagnostics(
+    request: Request,
+    get_diag_request: GetDiagnosticsRequest,
+    db: Session = Depends(get_db)
+):
+    """Request diagnostics from a charger (OCPP GetDiagnostics)"""
+    ocpp_handler = getattr(request.app.state, "ocpp_handler", None)
+    if not ocpp_handler:
+        raise HTTPException(status_code=500, detail="OCPP handler not available")
+
+    charger_id = get_diag_request.charger_id
+
+    # Connection check
+    latest_connection_event = db.query(ConnectionEvent).filter(
+        ConnectionEvent.charger_id == charger_id
+    ).order_by(ConnectionEvent.timestamp.desc()).first()
+
+    if not latest_connection_event:
+        raise HTTPException(status_code=404, detail=f"Charger '{charger_id}' has never connected.")
+    if latest_connection_event.event_type != "CONNECT":
+        raise HTTPException(status_code=400, detail=f"Charger '{charger_id}' is not currently connected.")
+    if charger_id not in ocpp_handler.charger_connections:
+        raise HTTPException(status_code=400, detail=f"Charger '{charger_id}' is not currently connected.")
+
+    # Construct OCPP message
+    message_id = str(uuid.uuid4())
+    ocpp_payload = {"location": get_diag_request.location}
+    if get_diag_request.start_time:
+        ocpp_payload["startTime"] = get_diag_request.start_time.isoformat()
+    if get_diag_request.stop_time:
+        ocpp_payload["stopTime"] = get_diag_request.stop_time.isoformat()
+    if get_diag_request.retries is not None:
+        ocpp_payload["retries"] = get_diag_request.retries
+    if get_diag_request.retry_interval is not None:
+        ocpp_payload["retryInterval"] = get_diag_request.retry_interval
+    
+    ocpp_message = [2, message_id, "GetDiagnostics", ocpp_payload]
+
+    success = await ocpp_handler.send_message_to_charger(charger_id, ocpp_message)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to send GetDiagnostics command")
+
+    await ocpp_handler.log_message(charger_id, "OUT", "GetDiagnostics", message_id, "Pending", None, json.dumps(ocpp_message), None)
+    logger.info(f"GetDiagnostics sent to {charger_id} (message_id={message_id})")
+
+    return OCPPResponse(status="Accepted", message_id=message_id, message=f"GetDiagnostics command sent to charger {charger_id}")
+
+@router.post("/ocpp/charging_profile/clear", response_model=OCPPResponse)
+async def clear_charging_profile(
+    request: Request,
+    clear_profile_request: ClearChargingProfileRequest,
+    db: Session = Depends(get_db)
+):
+    """Clear charging profile on a charger (OCPP ClearChargingProfile)"""
+    ocpp_handler = getattr(request.app.state, "ocpp_handler", None)
+    if not ocpp_handler:
+        raise HTTPException(status_code=500, detail="OCPP handler not available")
+
+    charger_id = clear_profile_request.charger_id
+
+    # Connection check
+    latest_connection_event = db.query(ConnectionEvent).filter(
+        ConnectionEvent.charger_id == charger_id
+    ).order_by(ConnectionEvent.timestamp.desc()).first()
+
+    if not latest_connection_event:
+        raise HTTPException(status_code=404, detail=f"Charger '{charger_id}' has never connected.")
+    if latest_connection_event.event_type != "CONNECT":
+        raise HTTPException(status_code=400, detail=f"Charger '{charger_id}' is not currently connected.")
+    if charger_id not in ocpp_handler.charger_connections:
+        raise HTTPException(status_code=400, detail=f"Charger '{charger_id}' is not currently connected.")
+
+    # Construct OCPP message
+    message_id = str(uuid.uuid4())
+    ocpp_payload = {}
+    if clear_profile_request.connector_id is not None:
+        ocpp_payload["connectorId"] = clear_profile_request.connector_id
+    if clear_profile_request.charging_profile_id is not None:
+        ocpp_payload["chargingProfileId"] = clear_profile_request.charging_profile_id
+    
+    ocpp_message = [2, message_id, "ClearChargingProfile", ocpp_payload]
+
+    success = await ocpp_handler.send_message_to_charger(charger_id, ocpp_message)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to send ClearChargingProfile command")
+
+    await ocpp_handler.log_message(charger_id, "OUT", "ClearChargingProfile", message_id, "Pending", None, json.dumps(ocpp_message), None)
+    logger.info(f"ClearChargingProfile sent to {charger_id} (message_id={message_id})")
+
+    return OCPPResponse(status="Accepted", message_id=message_id, message=f"ClearChargingProfile command sent to charger {charger_id}")
+
+@router.post("/ocpp/charging_profile/set", response_model=OCPPResponse)
+async def set_charging_profile(
+    request: Request,
+    set_profile_request: SetChargingProfileRequest,
+    db: Session = Depends(get_db)
+):
+    """Set charging profile on a charger (OCPP SetChargingProfile)"""
+    ocpp_handler = getattr(request.app.state, "ocpp_handler", None)
+    if not ocpp_handler:
+        raise HTTPException(status_code=500, detail="OCPP handler not available")
+
+    charger_id = set_profile_request.charger_id
+
+    # Connection check
+    latest_connection_event = db.query(ConnectionEvent).filter(
+        ConnectionEvent.charger_id == charger_id
+    ).order_by(ConnectionEvent.timestamp.desc()).first()
+
+    if not latest_connection_event:
+        raise HTTPException(status_code=404, detail=f"Charger '{charger_id}' has never connected.")
+    if latest_connection_event.event_type != "CONNECT":
+        raise HTTPException(status_code=400, detail=f"Charger '{charger_id}' is not currently connected.")
+    if charger_id not in ocpp_handler.charger_connections:
+        raise HTTPException(status_code=400, detail=f"Charger '{charger_id}' is not currently connected.")
+
+    # Construct OCPP message
+    message_id = str(uuid.uuid4())
+    ocpp_payload = {
+        "connectorId": set_profile_request.connector_id,
+        "chargingProfile": set_profile_request.charging_profile
+    }
+    ocpp_message = [2, message_id, "SetChargingProfile", ocpp_payload]
+
+    success = await ocpp_handler.send_message_to_charger(charger_id, ocpp_message)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to send SetChargingProfile command")
+
+    await ocpp_handler.log_message(charger_id, "OUT", "SetChargingProfile", message_id, "Pending", None, json.dumps(ocpp_message), None)
+    logger.info(f"SetChargingProfile sent to {charger_id} (message_id={message_id})")
+
+    return OCPPResponse(status="Accepted", message_id=message_id, message=f"SetChargingProfile command sent to charger {charger_id}")
+
+@router.post("/ocpp/firmware/update", response_model=OCPPResponse)
+async def update_firmware(
+    request: Request,
+    update_fw_request: UpdateFirmwareRequest,
+    db: Session = Depends(get_db)
+):
+    """Update firmware on a charger (OCPP UpdateFirmware)"""
+    ocpp_handler = getattr(request.app.state, "ocpp_handler", None)
+    if not ocpp_handler:
+        raise HTTPException(status_code=500, detail="OCPP handler not available")
+
+    charger_id = update_fw_request.charger_id
+
+    # Connection check
+    latest_connection_event = db.query(ConnectionEvent).filter(
+        ConnectionEvent.charger_id == charger_id
+    ).order_by(ConnectionEvent.timestamp.desc()).first()
+
+    if not latest_connection_event:
+        raise HTTPException(status_code=404, detail=f"Charger '{charger_id}' has never connected.")
+    if latest_connection_event.event_type != "CONNECT":
+        raise HTTPException(status_code=400, detail=f"Charger '{charger_id}' is not currently connected.")
+    if charger_id not in ocpp_handler.charger_connections:
+        raise HTTPException(status_code=400, detail=f"Charger '{charger_id}' is not currently connected.")
+
+    # Construct OCPP message
+    message_id = str(uuid.uuid4())
+    ocpp_payload = {
+        "location": update_fw_request.location,
+        "retrieveDate": update_fw_request.retrieve_date.isoformat()
+    }
+    if update_fw_request.retries is not None:
+        ocpp_payload["retries"] = update_fw_request.retries
+    if update_fw_request.retry_interval is not None:
+        ocpp_payload["retryInterval"] = update_fw_request.retry_interval
+    
+    ocpp_message = [2, message_id, "UpdateFirmware", ocpp_payload]
+
+    success = await ocpp_handler.send_message_to_charger(charger_id, ocpp_message)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to send UpdateFirmware command")
+
+    await ocpp_handler.log_message(charger_id, "OUT", "UpdateFirmware", message_id, "Pending", None, json.dumps(ocpp_message), None)
+    logger.info(f"UpdateFirmware sent to {charger_id} (message_id={message_id})")
+
+    return OCPPResponse(status="Accepted", message_id=message_id, message=f"UpdateFirmware command sent to charger {charger_id}")
+
 # --- Connection Events endpoints ---
 
 @router.get("/connection-events", response_model=List[ConnectionEventResponse], include_in_schema=True)

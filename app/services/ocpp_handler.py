@@ -27,6 +27,8 @@ from ocpp.v16.enums import (
     DiagnosticsStatus,
     FirmwareStatus,
     GetCompositeScheduleStatus,
+    CancelReservationStatus,
+    ReservationStatus,
 )
 
 from app.models.database import Charger, Connector, Session, MessageLog, ConnectionEvent, SystemConfig, SessionLocal
@@ -317,18 +319,28 @@ class OCPPHandler:
         """
         Handle incoming CALL messages from charger (CP → CS).
         
-        Handled messages:
+        Handled messages (CP → CS):
         - Authorize: User authorization
         - BootNotification: Charger registration
+        - CancelReservation: Cancel a reservation
         - DataTransfer: Vendor-specific data exchange
+        - DiagnosticsStatusNotification: Diagnostics status update
+        - FirmwareStatusNotification: Firmware update status
+        - GetCompositeSchedule: Request composite charging schedule
         - Heartbeat: Connection keep-alive
         - MeterValues: Energy consumption data
+        - ReserveNow: Reserve a connector
         - StartTransaction: Begin charging session
         - StatusNotification: Status changes
         - StopTransaction: End charging session
+        - TriggerMessage: Response to trigger message request
         
-        CS → CP messages (ChangeAvailability, ChangeConfiguration, ClearCache, etc.)
-        are sent via API endpoints in ocpp_control.py
+        CS → CP messages are sent via API endpoints in ocpp_control.py:
+        - ChangeAvailability, ChangeConfiguration, ClearCache, ClearChargingProfile
+        - GetConfiguration, GetDiagnostics, GetLocalListVersion
+        - RemoteStartTransaction, RemoteStopTransaction
+        - Reset, SendLocalList, SetChargingProfile, TriggerMessage
+        - UnlockConnector, UpdateFirmware
         """
         db = SessionLocal()
         try:
@@ -338,6 +350,8 @@ class OCPPHandler:
                 response = await self.handle_authorize(charger_id, message_id, payload)
             elif action == "BootNotification":
                 response = await self.handle_boot_notification(charger_id, message_id, payload)
+            elif action == "CancelReservation":
+                response = await self.handle_cancel_reservation(charger_id, message_id, payload)
             elif action == "DataTransfer":
                 response = await self.handle_data_transfer(charger_id, message_id, payload)
             elif action == "DiagnosticsStatusNotification":
@@ -348,6 +362,8 @@ class OCPPHandler:
                 response = await self.handle_get_composite_schedule(charger_id, message_id, payload)
             elif action == "Heartbeat":
                 response = await self.handle_heartbeat(charger_id, message_id, payload)
+            elif action == "ReserveNow":
+                response = await self.handle_reserve_now(charger_id, message_id, payload)
             elif action == "MeterValues":
                 response = await self.handle_meter_values(charger_id, message_id, payload)
             elif action == "StartTransaction":
@@ -356,6 +372,8 @@ class OCPPHandler:
                 response = await self.handle_status_notification(charger_id, message_id, payload)
             elif action == "StopTransaction":
                 response = await self.handle_stop_transaction(charger_id, message_id, payload)
+            elif action == "TriggerMessage":
+                response = await self.handle_trigger_message(charger_id, message_id, payload)
             else:
                 response = [4, message_id, "NotImplemented", f"Action {action} not supported", {}]
                 self.stats["messages_failed"] += 1
@@ -597,6 +615,51 @@ class OCPPHandler:
                     }
                 ]
             }
+        )
+        response_dict = asdict(response)
+        
+        return [3, message_id, response_dict]
+
+    async def handle_cancel_reservation(self, charger_id: str, message_id: str, payload: Dict[str, Any]) -> List[Any]:
+        """Handle CancelReservation message from charger"""
+        reservation_id = payload.get("reservationId")
+        logger.info(f"Received CancelReservation from {charger_id}: reservation_id={reservation_id}")
+        
+        response = call_result.CancelReservationPayload(
+            status=CancelReservationStatus.accepted
+        )
+        response_dict = asdict(response)
+        
+        return [3, message_id, response_dict]
+
+    async def handle_reserve_now(self, charger_id: str, message_id: str, payload: Dict[str, Any]) -> List[Any]:
+        """Handle ReserveNow message from charger"""
+        connector_id = payload.get("connectorId")
+        expiry_date = payload.get("expiryDate")
+        id_tag = payload.get("idTag")
+        reservation_id = payload.get("reservationId")
+        
+        logger.info(f"Received ReserveNow from {charger_id}: connector_id={connector_id}, reservation_id={reservation_id}, expiry={expiry_date}")
+        
+        response = call_result.ReserveNowPayload(
+            status=ReservationStatus.accepted
+        )
+        response_dict = asdict(response)
+        
+        return [3, message_id, response_dict]
+
+    async def handle_trigger_message(self, charger_id: str, message_id: str, payload: Dict[str, Any]) -> List[Any]:
+        """Handle TriggerMessage response from charger"""
+        requested_message = payload.get("requestedMessage")
+        connector_id = payload.get("connectorId", 0)
+        status = payload.get("status")
+        
+        logger.info(f"Received TriggerMessage response from {charger_id}: status={status}, message={requested_message}, connector={connector_id}")
+        
+        # This is a response to a TriggerMessage sent by the central system
+        # So we just acknowledge it
+        response = call_result.TriggerMessagePayload(
+            status=TriggerMessageStatus.accepted
         )
         response_dict = asdict(response)
         
