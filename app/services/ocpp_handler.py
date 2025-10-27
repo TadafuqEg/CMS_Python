@@ -311,24 +311,42 @@ class OCPPHandler:
             await self.send_message_to_charger(charger_id, error_response, processing_time=time() - start_time)
 
     async def handle_incoming_call(self, charger_id: str, message_id: str, action: str, payload: Dict[str, Any]) -> Optional[List[Any]]:
+        """
+        Handle incoming CALL messages from charger (CP → CS).
+        
+        Handled messages:
+        - Authorize: User authorization
+        - BootNotification: Charger registration
+        - DataTransfer: Vendor-specific data exchange
+        - Heartbeat: Connection keep-alive
+        - MeterValues: Energy consumption data
+        - StartTransaction: Begin charging session
+        - StatusNotification: Status changes
+        - StopTransaction: End charging session
+        
+        CS → CP messages (ChangeAvailability, ChangeConfiguration, ClearCache, etc.)
+        are sent via API endpoints in ocpp_control.py
+        """
         db = SessionLocal()
         try:
             start_time = time()
             response = None
-            if action == "BootNotification":
+            if action == "Authorize":
+                response = await self.handle_authorize(charger_id, message_id, payload)
+            elif action == "BootNotification":
                 response = await self.handle_boot_notification(charger_id, message_id, payload)
+            elif action == "DataTransfer":
+                response = await self.handle_data_transfer(charger_id, message_id, payload)
             elif action == "Heartbeat":
                 response = await self.handle_heartbeat(charger_id, message_id, payload)
-            elif action == "StatusNotification":
-                response = await self.handle_status_notification(charger_id, message_id, payload)
             elif action == "MeterValues":
                 response = await self.handle_meter_values(charger_id, message_id, payload)
             elif action == "StartTransaction":
                 response = await self.handle_start_transaction(charger_id, message_id, payload)
+            elif action == "StatusNotification":
+                response = await self.handle_status_notification(charger_id, message_id, payload)
             elif action == "StopTransaction":
                 response = await self.handle_stop_transaction(charger_id, message_id, payload)
-            elif action == "Authorize":
-                response = await self.handle_authorize(charger_id, message_id, payload)
             else:
                 response = [4, message_id, "NotImplemented", f"Action {action} not supported", {}]
                 self.stats["messages_failed"] += 1
@@ -502,6 +520,32 @@ class OCPPHandler:
         authorize_dict = asdict(authorize_response)
         
         return [3, message_id, authorize_dict]
+
+    async def handle_data_transfer(self, charger_id: str, message_id: str, payload: Dict[str, Any]) -> List[Any]:
+        """Handle DataTransfer message from charger"""
+        vendor_id = payload.get("vendorId")
+        data = payload.get("data")
+        vendor_message_id = payload.get("messageId")
+        
+        logger.info(f"Received DataTransfer from {charger_id}: vendor_id={vendor_id}, message_id={vendor_message_id}, data={data}")
+        
+        # Handle malformed JSON in data field (similar to central_system.py)
+        if isinstance(data, str):
+            try:
+                json.loads(data)
+                logger.info(f"DataTransfer data is valid JSON: {data}")
+            except json.JSONDecodeError as json_err:
+                logger.warning(f"DataTransfer contains invalid JSON in data field: {json_err}")
+                logger.warning(f"Raw data: {data}")
+                # Still accept the message but log the issue
+        
+        # Create proper DataTransferPayload using OCPP library
+        data_transfer_response = call_result.DataTransferPayload(
+            status=DataTransferStatus.accepted
+        )
+        data_transfer_dict = asdict(data_transfer_response)
+        
+        return [3, message_id, data_transfer_dict]
 
     async def send_message_to_charger(self, charger_id: str, message: List[Any], processing_time: float = 0.0) -> bool:
         ws = self.charger_connections.get(charger_id)
