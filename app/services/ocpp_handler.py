@@ -330,7 +330,7 @@ class OCPPHandler:
                 db.commit()
             return [3, payload.get("message_id", str(uuid.uuid4())), {
                 
-                "currentTime": datetime.now(gmt_plus_3).isoformat(),
+                "currentTime": datetime.now(gmt_plus_3).replace(tzinfo=None).isoformat(),
                 "interval": 60,
                 "status": "Accepted"
             }]
