@@ -29,6 +29,7 @@ from ocpp.v16.enums import (
     GetCompositeScheduleStatus,
     CancelReservationStatus,
     ReservationStatus,
+    RemoteStartStopStatus,
 )
 
 from app.models.database import Charger, Connector, Session, MessageLog, ConnectionEvent, SystemConfig, SessionLocal
@@ -681,7 +682,7 @@ class OCPPHandler:
         logger.info(f"Received RemoteStartTransaction from {charger_id}: id_tag={id_tag}, connector_id={connector_id}")
         
         response = call_result.RemoteStartTransactionPayload(
-            status=AuthorizationStatus.accepted
+            status=RemoteStartStopStatus.accepted
         )
         response_dict = asdict_camelcase(response)
         
@@ -693,9 +694,9 @@ class OCPPHandler:
         logger.info(f"Received RemoteStopTransaction from {charger_id}: transaction_id={transaction_id}")
         
         response = call_result.RemoteStopTransactionPayload(
-            status=AuthorizationStatus.accepted
+            status=RemoteStartStopStatus.accepted
         )
-        response_dict = asdict(response)
+        response_dict = asdict_camelcase(response)
         
         return [3, message_id, response_dict]
 
