@@ -180,6 +180,7 @@ class OCPPHandler:
                 start_time = time()
                 try:
                     ocpp_message = json.loads(message)
+                    logger.info(f"Received message from charger {charger_id}: {message}")
                     await self.forward_to_masters(charger_id, self.connection_ids[charger_id], ocpp_message, "incoming", time() - start_time)
                     await self.handle_charger_message(charger_id, ocpp_message)
                 except json.JSONDecodeError:
@@ -350,6 +351,7 @@ class OCPPHandler:
                     await self.send_message_to_charger(charger_id, response, processing_time=time() - start_time)
             elif message_type == 3:
                 message_id, payload = message[1:3]
+                logger.info(f"Received CALLRESULT from charger {charger_id}: message_id={message_id}, payload={payload}")
                 await self.handle_call_result(charger_id, message_id, payload)
             elif message_type == 4:
                 message_id, error_code, error_description, error_details = message[1:5]
@@ -824,16 +826,21 @@ class OCPPHandler:
     async def send_message_to_charger(self, charger_id: str, message: List[Any], processing_time: float = 0.0) -> bool:
         ws = self.charger_connections.get(charger_id)
         if not ws:
+            logger.error(f"No WebSocket connection found for charger {charger_id}")
             self.stats["messages_failed"] += 1
             return False
 
         message_id = message[1] if len(message) > 1 else str(uuid.uuid4())
         start_time = time()
         try:
-            await ws.send(json.dumps(message))
+            message_json = json.dumps(message)
+            logger.info(f"Sending message to charger {charger_id}: {message_json}")
+            await ws.send(message_json)
             await self.forward_to_masters(charger_id, self.connection_ids.get(charger_id, str(uuid.uuid4())), message, "outgoing", processing_time or (time() - start_time))
             self.stats["messages_sent"] += 1
             if message[0] == 2:
+                action = message[2] if len(message) > 2 else "Unknown"
+                logger.info(f"Added message to pending queue for charger {charger_id}: message_id={message_id}, action={action}")
                 self.pending_messages[message_id] = PendingMessage(
                     message_id=message_id,
                     charger_id=charger_id,
