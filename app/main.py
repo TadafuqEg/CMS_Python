@@ -28,6 +28,7 @@ logging.basicConfig(
 logging.getLogger('websockets').setLevel(logging.WARNING)
 logging.getLogger('asyncio').setLevel(logging.WARNING)
 logging.getLogger('uvicorn').setLevel(logging.INFO)
+logging.getLogger('watchfiles').setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 ocpp_handler = None
