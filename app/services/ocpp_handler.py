@@ -493,12 +493,37 @@ class OCPPHandler:
             connector_id = payload.get("connectorId", 0)
             status = payload.get("status")
             error_code = payload.get("errorCode")
-            connector = db.query(Connector).filter(Connector.charger_id == charger_id, Connector.connector_id == connector_id).first()
+            
+            # Ensure charger exists in database
+            charger = db.query(Charger).filter(Charger.id == charger_id).first()
+            if not charger:
+                charger = Charger(id=charger_id, status="Unknown", is_connected=True, last_heartbeat=datetime.utcnow())
+                db.add(charger)
+                db.flush()  # Flush to get the charger ID for foreign key
+            
+            # Query for existing connector
+            connector = db.query(Connector).filter(
+                Connector.charger_id == charger_id, 
+                Connector.connector_id == connector_id
+            ).first()
+            
             if connector:
+                # Update existing connector
                 connector.status = status
                 connector.error_code = error_code
-                connector.last_updated = datetime.utcnow()
-                db.commit()
+                connector.updated_at = datetime.utcnow()
+            else:
+                # Create new connector
+                connector = Connector(
+                    charger_id=charger_id,
+                    connector_id=connector_id,
+                    status=status,
+                    error_code=error_code
+                )
+                db.add(connector)
+            
+            db.commit()
+            logger.info(f"StatusNotification processed for charger {charger_id}, connector {connector_id}: status={status}, error_code={error_code}")
             
             # Create proper StatusNotificationPayload using OCPP library (empty dict)
             status_response = call_result.StatusNotificationPayload()
