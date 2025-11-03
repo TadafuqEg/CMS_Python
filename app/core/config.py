@@ -5,7 +5,9 @@ Configuration settings for the OCPP Central Management System
 import os
 import ssl
 from typing import List, Optional, Tuple, Dict, Any
+from datetime import datetime, timedelta
 from pydantic_settings import BaseSettings
+import pytz
 
 class Settings(BaseSettings):
     """Application settings"""
@@ -159,3 +161,33 @@ def get_uvicorn_ssl_kwargs() -> Dict[str, Any]:
         kwargs['ssl_certfile'] = ssl_certfile
     
     return kwargs
+
+# Egypt timezone configuration
+EGYPT_TZ = pytz.timezone('Africa/Cairo')
+
+def get_egypt_now() -> datetime:
+    """
+    Get current datetime in Egypt timezone (Africa/Cairo).
+    This handles both EET (UTC+2) and EEST (UTC+3 during daylight saving time).
+    """
+    return datetime.now(EGYPT_TZ)
+
+def get_egypt_utcnow() -> datetime:
+    """
+    Get current datetime in Egypt timezone (Africa/Cairo).
+    Alias for get_egypt_now() for backward compatibility.
+    """
+    return get_egypt_now()
+
+def to_egypt_timezone(dt: datetime) -> datetime:
+    """
+    Convert a datetime to Egypt timezone.
+    If datetime is naive (no timezone), assumes it's already in Egypt timezone.
+    If datetime is timezone-aware, converts it to Egypt timezone.
+    """
+    if dt.tzinfo is None:
+        # Naive datetime - assume it's in Egypt timezone
+        return EGYPT_TZ.localize(dt)
+    else:
+        # Timezone-aware datetime - convert to Egypt timezone
+        return dt.astimezone(EGYPT_TZ)

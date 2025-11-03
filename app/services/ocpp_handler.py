@@ -8,6 +8,8 @@ from dataclasses import dataclass, asdict
 from time import time
 from sqlalchemy import func
 
+from app.core.config import get_egypt_now, to_egypt_timezone
+
 import websockets
 from websockets.server import WebSocketServerProtocol
 from fastapi import WebSocket
@@ -165,12 +167,12 @@ class OCPPHandler:
         try:
             charger = db.query(Charger).filter(Charger.id == charger_id).first()
             if not charger:
-                charger = Charger(id=charger_id, status="Unknown", is_connected=True, last_heartbeat=datetime.utcnow())
+                charger = Charger(id=charger_id, status="Unknown", is_connected=True, last_heartbeat=get_egypt_now())
                 db.add(charger)
             else:
                 charger.is_connected = True
-                charger.last_heartbeat = datetime.utcnow()
-            db.add(ConnectionEvent(charger_id=charger_id, event_type="CONNECT", timestamp=datetime.utcnow()))
+                charger.last_heartbeat = get_egypt_now()
+            db.add(ConnectionEvent(charger_id=charger_id, event_type="CONNECT", timestamp=get_egypt_now()))
             db.commit()
         finally:
             db.close()
@@ -186,7 +188,7 @@ class OCPPHandler:
                 except json.JSONDecodeError:
                     error_msg = {
                         "message_type": "error",
-                        "timestamp": datetime.utcnow().isoformat() + "Z",
+                        "timestamp": get_egypt_now().isoformat(),
                         "charger_id": charger_id,
                         "error": "Invalid JSON format",
                         "raw_message": str(message)
@@ -196,7 +198,7 @@ class OCPPHandler:
         except websockets.exceptions.ConnectionClosed:
             error_msg = {
                 "message_type": "connection_event",
-                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "timestamp": get_egypt_now().isoformat(),
                 "charger_id": charger_id,
                 "event": "disconnected",
                 "reason": "WebSocket connection closed"
@@ -211,7 +213,7 @@ class OCPPHandler:
                 charger = db.query(Charger).filter(Charger.id == charger_id).first()
                 if charger:
                     charger.is_connected = False
-                db.add(ConnectionEvent(charger_id=charger_id, event_type="DISCONNECT", timestamp=datetime.utcnow()))
+                db.add(ConnectionEvent(charger_id=charger_id, event_type="DISCONNECT", timestamp=get_egypt_now()))
                 db.commit()
             finally:
                 db.close()
@@ -231,7 +233,7 @@ class OCPPHandler:
 
         forwarded_message = {
             "message_type": "ocpp_forward",
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": get_egypt_now().isoformat(),
             "charger_id": charger_id,
             "connection_id": connection_id,
             "direction": direction,
@@ -243,7 +245,7 @@ class OCPPHandler:
         db = SessionLocal()
         try:
             db.add(MessageLog(
-                timestamp=datetime.utcnow(),
+                timestamp=get_egypt_now(),
                 charger_id=charger_id,
                 message_type="FORWARD",
                 action="ForwardToMaster",
@@ -456,7 +458,7 @@ class OCPPHandler:
             
             # Create proper BootNotificationPayload using OCPP library
             boot_response = call_result.BootNotificationPayload(
-                current_time=datetime.now().isoformat(),
+                current_time=get_egypt_now().isoformat(),
                 interval=60,
                 status=RegistrationStatus.accepted
             )
@@ -474,12 +476,12 @@ class OCPPHandler:
         try:
             charger = db.query(Charger).filter(Charger.id == charger_id).first()
             if charger:
-                charger.last_heartbeat = datetime.utcnow()
+                charger.last_heartbeat = get_egypt_now()
                 db.commit()
             
             # Create proper HeartbeatPayload using OCPP library
             heartbeat_response = call_result.HeartbeatPayload(
-                current_time=datetime.now().isoformat()
+                current_time=get_egypt_now().isoformat()
             )
             heartbeat_dict = asdict_camelcase(heartbeat_response)
             
@@ -497,7 +499,7 @@ class OCPPHandler:
             # Ensure charger exists in database
             charger = db.query(Charger).filter(Charger.id == charger_id).first()
             if not charger:
-                charger = Charger(id=charger_id, status="Unknown", is_connected=True, last_heartbeat=datetime.utcnow())
+                charger = Charger(id=charger_id, status="Unknown", is_connected=True, last_heartbeat=get_egypt_now())
                 db.add(charger)
                 db.flush()  # Flush to get the charger ID for foreign key
             
@@ -511,7 +513,7 @@ class OCPPHandler:
                 # Update existing connector
                 connector.status = status
                 connector.error_code = error_code
-                connector.updated_at = datetime.utcnow()
+                connector.updated_at = get_egypt_now()
             else:
                 # Create new connector
                 connector = Connector(
@@ -548,7 +550,7 @@ class OCPPHandler:
                         connector = db.query(Connector).filter(Connector.charger_id == charger_id, Connector.connector_id == connector_id).first()
                         if connector:
                             connector.energy_delivered = float(sample.get("value", 0)) / 1000
-                            connector.last_updated = datetime.utcnow()
+                            connector.last_updated = get_egypt_now()
                             db.commit()
             
             # Create proper MeterValuesPayload using OCPP library (empty dict)
@@ -578,7 +580,7 @@ class OCPPHandler:
                 connector_id=connector_id,
                 transaction_id=transaction_id,
                 id_tag=id_tag,
-                start_time=datetime.utcnow(),
+                start_time=get_egypt_now(),
                 status="Active"
             )
             db.add(session)
@@ -605,7 +607,7 @@ class OCPPHandler:
             
             session = db.query(Session).filter(Session.transaction_id == transaction_id, Session.charger_id == charger_id).first()
             if session:
-                session.stop_time = datetime.utcnow()
+                session.stop_time = get_egypt_now()
                 session.meter_stop = payload.get("meterStop")
                 session.energy_delivered = (session.meter_stop - session.meter_start) / 1000 if session.meter_start and session.meter_stop else 0
                 session.status = "Completed"
@@ -687,7 +689,7 @@ class OCPPHandler:
         response = call_result.GetCompositeSchedulePayload(
             status=GetCompositeScheduleStatus.accepted,
             connector_id=connector_id,
-            schedule_start=datetime.now().isoformat(),
+            schedule_start=get_egypt_now().isoformat(),
             charging_schedule={
                 "chargingRateUnit": charging_rate_unit or "W",
                 "chargingSchedulePeriod": [
@@ -871,7 +873,7 @@ class OCPPHandler:
                     charger_id=charger_id,
                     action=message[2],
                     payload=message[3],
-                    timestamp=datetime.utcnow()
+                    timestamp=get_egypt_now()
                 )
                 self.stats["pending_messages"] += 1
             return True
@@ -926,7 +928,7 @@ class OCPPHandler:
                         continue
                     
                     # Check if timeout elapsed - stop retrying
-                    time_elapsed = (datetime.utcnow() - pending_msg.timestamp).total_seconds()
+                    time_elapsed = (get_egypt_now() - pending_msg.timestamp).total_seconds()
                     if time_elapsed > pending_msg.response_timeout:
                         logger.warning(f"Message {message_id} timed out after {pending_msg.response_timeout}s, stopping retries")
                         self.pending_messages.pop(message_id, None)
@@ -941,12 +943,12 @@ class OCPPHandler:
                         continue
                     
                     # Check if retry interval has elapsed
-                    if pending_msg.last_send_attempt and (datetime.utcnow() - pending_msg.last_send_attempt).total_seconds() < retry_config["retry_interval"]:
+                    if pending_msg.last_send_attempt and (get_egypt_now() - pending_msg.last_send_attempt).total_seconds() < retry_config["retry_interval"]:
                         continue
                     
                     # Retry the message
                     pending_msg.retry_count += 1
-                    pending_msg.last_send_attempt = datetime.utcnow()
+                    pending_msg.last_send_attempt = get_egypt_now()
                     success = await self.send_message_to_charger(charger_id=pending_msg.charger_id, message=[2, message_id, pending_msg.action, pending_msg.payload])
                     pending_msg.send_successful = success
                     if not success:
@@ -964,10 +966,13 @@ class OCPPHandler:
                 try:
                     chargers = db.query(Charger).all()
                     for charger in chargers:
-                        if charger.is_connected and (datetime.utcnow() - charger.last_heartbeat).total_seconds() > 600:
-                            charger.is_connected = False
-                            db.add(ConnectionEvent(charger_id=charger.id, event_type="TIMEOUT", timestamp=datetime.utcnow()))
-                            db.commit()
+                        if charger.is_connected and charger.last_heartbeat:
+                            # Convert last_heartbeat to timezone-aware if needed
+                            heartbeat_time = to_egypt_timezone(charger.last_heartbeat) if charger.last_heartbeat else None
+                            if heartbeat_time and (get_egypt_now() - heartbeat_time).total_seconds() > 600:
+                                charger.is_connected = False
+                                db.add(ConnectionEvent(charger_id=charger.id, event_type="TIMEOUT", timestamp=get_egypt_now()))
+                                db.commit()
                         # Removed heartbeat sending logic - only charging points should send heartbeats
                         # The central system should only monitor for received heartbeats
                 finally:
@@ -994,7 +999,7 @@ class OCPPHandler:
                         charger = db.query(Charger).filter(Charger.id == charger_id).first()
                         if charger:
                             charger.is_connected = False
-                        db.add(ConnectionEvent(charger_id=charger_id, event_type="DISCONNECT", timestamp=datetime.utcnow()))
+                        db.add(ConnectionEvent(charger_id=charger_id, event_type="DISCONNECT", timestamp=get_egypt_now()))
                         db.commit()
                     finally:
                         db.close()
@@ -1009,7 +1014,7 @@ class OCPPHandler:
         db = SessionLocal()
         try:
             log_entry = MessageLog(
-                timestamp=datetime.utcnow(),
+                timestamp=get_egypt_now(),
                 charger_id=charger_id,
                 message_type=message_type,
                 action=action,

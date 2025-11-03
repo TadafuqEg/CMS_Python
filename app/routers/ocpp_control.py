@@ -4,7 +4,7 @@ OCPP control endpoints for remote operations
 import asyncio
 from pydantic import BaseModel, validator, Field, constr
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request
 from sqlalchemy.orm import Session
@@ -14,6 +14,7 @@ import json
 import logging
 from typing import Literal
 from app.models.database import get_db, ConnectionEvent, Connector, SessionLocal, SystemConfig
+from app.core.config import get_egypt_now, to_egypt_timezone
 
 logger = logging.getLogger(__name__)
 
@@ -1573,8 +1574,7 @@ async def get_connection_event_stats(request: Request = None, db: Session = Depe
         charger_events = db.query(ConnectionEvent.charger_id, db.func.count(ConnectionEvent.id)).group_by(ConnectionEvent.charger_id).all()
         
         # Get recent events (last 24 hours)
-        from datetime import datetime, timedelta
-        yesterday = datetime.utcnow() - timedelta(days=1)
+        yesterday = get_egypt_now() - timedelta(days=1)
         recent_events = db.query(ConnectionEvent).filter(ConnectionEvent.timestamp >= yesterday).count()
         
         return {
@@ -1627,7 +1627,7 @@ async def set_charger_retry_config(
         charger.max_retries = config.max_retries
         charger.retry_interval = config.retry_interval
         charger.retry_enabled = config.retry_enabled
-        charger.updated_at = datetime.utcnow()
+        charger.updated_at = get_egypt_now()
         
         db.commit()
         
@@ -1680,7 +1680,7 @@ async def set_system_retry_config(
         max_retries_config = db.query(SystemConfig).filter(SystemConfig.key == "max_retries").first()
         if max_retries_config:
             max_retries_config.value = str(config.max_retries)
-            max_retries_config.updated_at = datetime.utcnow()
+            max_retries_config.updated_at = get_egypt_now()
         else:
             max_retries_config = SystemConfig(
                 key="max_retries",
@@ -1693,7 +1693,7 @@ async def set_system_retry_config(
         retry_interval_config = db.query(SystemConfig).filter(SystemConfig.key == "retry_interval").first()
         if retry_interval_config:
             retry_interval_config.value = str(config.retry_interval)
-            retry_interval_config.updated_at = datetime.utcnow()
+            retry_interval_config.updated_at = get_egypt_now()
         else:
             retry_interval_config = SystemConfig(
                 key="retry_interval",
@@ -1749,7 +1749,7 @@ async def enable_charger_retry(
             raise HTTPException(status_code=404, detail=f"Charger '{charger_id}' not found")
         
         charger.retry_enabled = True
-        charger.updated_at = datetime.utcnow()
+        charger.updated_at = get_egypt_now()
         db.commit()
         
         logger.info(f"Enabled retry for charger {charger_id}")
@@ -1773,7 +1773,7 @@ async def disable_charger_retry(
             raise HTTPException(status_code=404, detail=f"Charger '{charger_id}' not found")
         
         charger.retry_enabled = False
-        charger.updated_at = datetime.utcnow()
+        charger.updated_at = get_egypt_now()
         db.commit()
         
         logger.info(f"Disabled retry for charger {charger_id}")
