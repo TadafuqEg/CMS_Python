@@ -12,7 +12,7 @@ import ssl
 import websockets
 from websockets.server import WebSocketServerProtocol
 
-from app.routers import health, chargers, ocpp_control, logs, internal
+from app.routers import health, chargers, ocpp_control, logs, internal, rfid_cards, users
 from app.services.ocpp_handler import OCPPHandler
 from app.services.session_manager import SessionManager
 from app.services.mq_bridge import MQBridge
@@ -87,6 +87,8 @@ app.include_router(chargers.router, prefix="/api", tags=["Chargers"])
 app.include_router(ocpp_control.router, prefix="/api", tags=["OCPP Control"])
 app.include_router(logs.router, prefix="/api", tags=["Logs"])
 app.include_router(internal.router, prefix="/api", tags=["Internal"])
+app.include_router(rfid_cards.router, prefix="/api", tags=["RFID Cards"])
+app.include_router(users.router, prefix="/api", tags=["Users"])
 
 @app.websocket("/ocpp/{charger_id}")
 async def websocket_ocpp_endpoint(websocket: WebSocket, charger_id: str):

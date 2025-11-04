@@ -189,6 +189,43 @@ class ConnectionEvent(Base):
     # Relationships
     charger = relationship("Charger", back_populates="connection_events")
 
+class RFIDCard(Base):
+    """RFID Card model for authorization"""
+    __tablename__ = "rfid_cards"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    id_tag = Column(String, unique=True, nullable=False, index=True)  # RFID tag ID (unique)
+    
+    # Card information
+    card_number = Column(String, nullable=True)  # Physical card number
+    holder_name = Column(String, nullable=True)  # Card holder name
+    description = Column(String, nullable=True)  # Optional description
+    
+    # Status
+    is_active = Column(Boolean, default=True)  # Active/Inactive card
+    is_blocked = Column(Boolean, default=False)  # Blocked card
+    
+    # Expiration
+    expires_at = Column(DateTime, nullable=True)  # Card expiration date
+    
+    # User association
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    
+    # Organization/Site
+    organization_id = Column(String, nullable=True)
+    site_id = Column(String, nullable=True)
+    
+    # Additional metadata
+    card_metadata = Column(JSON, default=dict)
+    
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    last_used_at = Column(DateTime, nullable=True)  # Last time card was used
+    
+    # Relationships
+    user = relationship("User", backref="rfid_cards")
+
 class User(Base):
     """User model for authentication"""
     __tablename__ = "users"

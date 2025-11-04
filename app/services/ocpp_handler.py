@@ -34,7 +34,7 @@ from ocpp.v16.enums import (
     RemoteStartStopStatus,
 )
 
-from app.models.database import Charger, Connector, Session, MessageLog, ConnectionEvent, SystemConfig, SessionLocal
+from app.models.database import Charger, Connector, Session, MessageLog, ConnectionEvent, SystemConfig, SessionLocal, RFIDCard
 from app.core.config import settings, create_ssl_context
 from app.services.session_manager import SessionManager
 from app.services.mq_bridge import MQBridge
@@ -624,13 +624,96 @@ class OCPPHandler:
             db.close()
 
     async def handle_authorize(self, charger_id: str, message_id: str, payload: Dict[str, Any]) -> List[Any]:
-        # Create proper AuthorizePayload using OCPP library
-        authorize_response = call_result.AuthorizePayload(
-            id_tag_info={'status': AuthorizationStatus.accepted}
-        )
-        authorize_dict = asdict_camelcase(authorize_response)
-        
-        return [3, message_id, authorize_dict]
+        """
+        Handle Authorize request - Check RFID card in database
+        Returns Accepted if card exists and is active, Rejected otherwise
+        """
+        db = SessionLocal()
+        try:
+            id_tag = payload.get("idTag")
+            
+            logger.info(f"Authorize request received: charger_id={charger_id}, idTag={id_tag}")
+            
+            if not id_tag:
+                logger.warning(f"Authorize request without idTag from charger {charger_id}")
+                authorize_response = call_result.AuthorizePayload(
+                    id_tag_info={'status': AuthorizationStatus.invalid}
+                )
+                authorize_dict = asdict_camelcase(authorize_response)
+                return [3, message_id, authorize_dict]
+            
+            # Check if RFID card exists in database
+            rfid_card = db.query(RFIDCard).filter(RFIDCard.id_tag == id_tag).first()
+            
+            if not rfid_card:
+                logger.info(f"RFID card {id_tag} not found in database - REJECTED")
+                authorize_response = call_result.AuthorizePayload(
+                    id_tag_info={'status': AuthorizationStatus.invalid}
+                )
+                authorize_dict = asdict_camelcase(authorize_response)
+                return [3, message_id, authorize_dict]
+            
+            logger.info(f"RFID card found: id_tag={rfid_card.id_tag}, is_active={rfid_card.is_active}, is_blocked={rfid_card.is_blocked}, expires_at={rfid_card.expires_at}")
+            
+            # Check if card is blocked
+            if rfid_card.is_blocked:
+                logger.warning(f"RFID card {id_tag} is blocked - REJECTED")
+                authorize_response = call_result.AuthorizePayload(
+                    id_tag_info={'status': AuthorizationStatus.blocked}
+                )
+                authorize_dict = asdict_camelcase(authorize_response)
+                return [3, message_id, authorize_dict]
+            
+            # Check if card is active
+            if not rfid_card.is_active:
+                logger.warning(f"RFID card {id_tag} is inactive - REJECTED")
+                authorize_response = call_result.AuthorizePayload(
+                    id_tag_info={'status': AuthorizationStatus.invalid}
+                )
+                authorize_dict = asdict_camelcase(authorize_response)
+                return [3, message_id, authorize_dict]
+            
+            # Check if card is expired
+            current_time = get_egypt_now()
+            if rfid_card.expires_at:
+                # Make both datetimes timezone-aware for comparison
+                expires_at = rfid_card.expires_at
+                # If expires_at is naive, make it timezone-aware using current timezone
+                if expires_at.tzinfo is None:
+                    # Assume it's in the same timezone as current_time
+                    expires_at = to_egypt_timezone(expires_at)
+                
+                logger.info(f"Checking expiration: expires_at={expires_at}, current_time={current_time}, expired={expires_at < current_time}")
+                if expires_at < current_time:
+                    logger.warning(f"RFID card {id_tag} is expired (expires_at={expires_at}, current_time={current_time}) - REJECTED")
+                    authorize_response = call_result.AuthorizePayload(
+                        id_tag_info={'status': AuthorizationStatus.expired}
+                    )
+                    authorize_dict = asdict_camelcase(authorize_response)
+                    return [3, message_id, authorize_dict]
+            
+            # Card is valid - update last_used_at
+            rfid_card.last_used_at = get_egypt_now()
+            db.commit()
+            
+            logger.info(f"RFID card {id_tag} authorized successfully - ACCEPTED")
+            authorize_response = call_result.AuthorizePayload(
+                id_tag_info={'status': AuthorizationStatus.accepted}
+            )
+            authorize_dict = asdict_camelcase(authorize_response)
+            
+            return [3, message_id, authorize_dict]
+            
+        except Exception as e:
+            logger.error(f"Error handling authorize for id_tag {payload.get('idTag')}: {e}", exc_info=True)
+            # On error, reject the authorization
+            authorize_response = call_result.AuthorizePayload(
+                id_tag_info={'status': AuthorizationStatus.invalid}
+            )
+            authorize_dict = asdict_camelcase(authorize_response)
+            return [3, message_id, authorize_dict]
+        finally:
+            db.close()
 
     async def handle_data_transfer(self, charger_id: str, message_id: str, payload: Dict[str, Any]) -> List[Any]:
         """Handle DataTransfer message from charger"""
