@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field
 from app.models.database import get_db, RFIDCard, User
-from app.core.config import get_egypt_now
+from app.core.config import get_egypt_now, to_egypt_timezone
 
 router = APIRouter()
 
@@ -266,12 +266,23 @@ async def get_rfid_card_status(
         }
     
     # Check status
+    current_time = get_egypt_now()
+    
     if card.is_blocked:
         status = "Blocked"
     elif not card.is_active:
         status = "Invalid"
-    elif card.expires_at and card.expires_at < get_egypt_now():
-        status = "Expired"
+    elif card.expires_at:
+        # Make both datetimes timezone-aware for comparison
+        expires_at = card.expires_at
+        # If expires_at is naive, make it timezone-aware using current timezone
+        if expires_at.tzinfo is None:
+            expires_at = to_egypt_timezone(expires_at)
+        
+        if expires_at < current_time:
+            status = "Expired"
+        else:
+            status = "Accepted"
     else:
         status = "Accepted"
     
