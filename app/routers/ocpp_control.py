@@ -37,7 +37,6 @@ class StartChargingRequest(BaseModel):
 
 class StopChargingRequest(BaseModel):
     charger_id: str
-    transaction_id: int
 
 # Stats response models
 class ConnectionStats(BaseModel):
@@ -108,13 +107,34 @@ async def start_charging(request: Request, body: StartChargingRequest):
 
 
 @router.post("/charging/stop", include_in_schema=True)
-async def stop_charging(request: Request, body: StopChargingRequest):
+async def stop_charging(request: Request, body: StopChargingRequest, db: Session = Depends(get_db)):
     """
     Stop charging by sending RemoteStopTransaction to the charger via WebSocket.
+    Gets transaction_id from the database (active session) instead of from the request.
     """
     ocpp_handler = getattr(request.app.state, "ocpp_handler", None)
     if not ocpp_handler or not hasattr(ocpp_handler, "charger_connections") or body.charger_id not in ocpp_handler.charger_connections:
         raise HTTPException(status_code=404, detail="Charger not connected")
+
+    # Get active session from database to retrieve transaction_id
+    active_session = db.query(DBSession).filter(
+        DBSession.charger_id == body.charger_id,
+        DBSession.status == "Active"
+    ).order_by(DBSession.start_time.desc()).first()
+    
+    if not active_session:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No active charging session found for charger '{body.charger_id}'"
+        )
+    
+    if active_session.transaction_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Active session found for charger '{body.charger_id}' but transaction_id is missing"
+        )
+    
+    transaction_id = active_session.transaction_id
 
     # Build OCPP RemoteStopTransaction message
     message_id = str(uuid.uuid4())
@@ -123,7 +143,7 @@ async def stop_charging(request: Request, body: StopChargingRequest):
         message_id,
         "RemoteStopTransaction",
         {
-            "transactionId": body.transaction_id
+            "transactionId": transaction_id
         }
     ]
 
@@ -135,7 +155,7 @@ async def stop_charging(request: Request, body: StopChargingRequest):
     if not success:
         raise HTTPException(status_code=500, detail="Failed to send stop command")
 
-    return {"status": "sent", "message_id": message_id}
+    return {"status": "sent", "message_id": message_id, "transaction_id": transaction_id}
 
 # Pydantic models for requests
 class RemoteStartRequest(BaseModel):
@@ -146,7 +166,6 @@ class RemoteStartRequest(BaseModel):
 
 class RemoteStopRequest(BaseModel):
     charger_id: str
-    transaction_id: int
 
 class UnlockConnectorRequest(BaseModel):
     charger_id: str
@@ -373,39 +392,68 @@ async def remote_start_transaction(
 
 @router.post("/ocpp/remote/stop", response_model=OCPPResponse)
 async def remote_stop_transaction(
-    request: RemoteStopRequest,
+    request: Request,
+    remote_stop_req: RemoteStopRequest,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db)
 ):
-    """Stop a running charging session"""
+    """Stop a running charging session. Gets transaction_id from database instead of request."""
     
     # Verify charger exists and is connected
-    charger = db.query(Charger).filter(Charger.id == request.charger_id).first()
+    charger = db.query(Charger).filter(Charger.id == remote_stop_req.charger_id).first()
     if not charger:
         raise HTTPException(status_code=404, detail="Charger not found")
     
     if not charger.is_connected:
         raise HTTPException(status_code=400, detail="Charger is not connected")
     
-    # Verify session exists
+    # Get active session from database to retrieve transaction_id
     session = db.query(DBSession).filter(
-        DBSession.charger_id == request.charger_id,
-        DBSession.transaction_id == request.transaction_id,
+        DBSession.charger_id == remote_stop_req.charger_id,
         DBSession.status == "Active"
-    ).first()
+    ).order_by(DBSession.start_time.desc()).first()
     
     if not session:
-        raise HTTPException(status_code=404, detail="Active session not found")
+        raise HTTPException(status_code=404, detail=f"No active charging session found for charger '{remote_stop_req.charger_id}'")
+    
+    if session.transaction_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Active session found for charger '{remote_stop_req.charger_id}' but transaction_id is missing"
+        )
+    
+    transaction_id = session.transaction_id
+    
+    # Get OCPP handler and send RemoteStopTransaction
+    ocpp_handler = getattr(request.app.state, "ocpp_handler", None)
+    if not ocpp_handler:
+        raise HTTPException(status_code=500, detail="OCPP handler not available")
     
     # Generate unique message ID
     message_id = str(uuid.uuid4())
     
-    # TODO: Send RemoteStopTransaction via WebSocket
+    # Build and send RemoteStopTransaction message
+    ocpp_message = [
+        2,  # CALL
+        message_id,
+        "RemoteStopTransaction",
+        {
+            "transactionId": transaction_id
+        }
+    ]
+    
+    send_func = getattr(ocpp_handler, "send_message_to_charger", None)
+    if not send_func:
+        raise HTTPException(status_code=500, detail="OCPP handler missing send_message_to_charger")
+    
+    success = await send_func(remote_stop_req.charger_id, ocpp_message)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to send RemoteStopTransaction")
     
     return OCPPResponse(
         status="Accepted",
         message_id=message_id,
-        message="Remote stop command sent successfully"
+        message=f"Remote stop command sent successfully for transaction_id {transaction_id}"
     )
 
 @router.post("/ocpp/connector/unlock", response_model=OCPPResponse)
@@ -836,7 +884,6 @@ class RemoteStartBody(BaseModel):
 
 class RemoteStopBody(BaseModel):
     charger_id: str
-    transaction_id: int
 
 @router.post("/charging/remote_start")
 async def charging_remote_start(request: Request, body: RemoteStartBody, db: Session = Depends(get_db)):
@@ -915,6 +962,7 @@ async def charging_remote_start(request: Request, body: RemoteStartBody, db: Ses
 async def charging_remote_stop(request: Request, body: RemoteStopBody, db: Session = Depends(get_db)):
     """
     Remotely stop charging by sending RemoteStopTransaction to the charger via WebSocket.
+    Gets transaction_id from the database (active session) instead of from the request.
     """
     ocpp_handler = getattr(request.app.state, "ocpp_handler", None)
     if not ocpp_handler or not hasattr(ocpp_handler, "charger_connections"):
@@ -931,13 +979,33 @@ async def charging_remote_stop(request: Request, body: RemoteStopBody, db: Sessi
             detail=f"Charger '{body.charger_id}' not connected. Connected charger_ids: {connected_ids}. Please connect your OCPP client to wss://localhost:9001/ocpp/{body.charger_id}"
         )
 
+    # Get active session from database to retrieve transaction_id
+    active_session = db.query(DBSession).filter(
+        DBSession.charger_id == body.charger_id,
+        DBSession.status == "Active"
+    ).order_by(DBSession.start_time.desc()).first()
+    
+    if not active_session:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No active charging session found for charger '{body.charger_id}'"
+        )
+    
+    if active_session.transaction_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Active session found for charger '{body.charger_id}' but transaction_id is missing"
+        )
+    
+    transaction_id = active_session.transaction_id
+
     message_id = str(uuid.uuid4())
     ocpp_message = [
         2,  # CALL
         message_id,
         "RemoteStopTransaction",
         {
-            "transactionId": body.transaction_id
+            "transactionId": transaction_id
         }
     ]
     send_func = getattr(ocpp_handler, "send_message_to_charger", None)
@@ -946,7 +1014,7 @@ async def charging_remote_stop(request: Request, body: RemoteStopBody, db: Sessi
     success = await send_func(body.charger_id, ocpp_message)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to send RemoteStopTransaction")
-    return {"status": "sent", "message_id": message_id}
+    return {"status": "sent", "message_id": message_id, "transaction_id": transaction_id}
 
 @router.post("/ocpp/local_list/send", response_model=OCPPResponse)
 async def send_local_list(
