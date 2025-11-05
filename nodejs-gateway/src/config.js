@@ -2,7 +2,7 @@ require('dotenv').config();
 
 module.exports = {
   server: {
-    port: parseInt(process.env.PORT || 8080, 10),
+    port: parseInt(process.env.PORT || 7070, 10),
     host: process.env.HOST || '0.0.0.0',
     instanceId: process.env.INSTANCE_ID || `gateway-${process.pid}`,
     maxConnections: parseInt(process.env.MAX_CONNECTIONS_PER_INSTANCE || 10000, 10),
