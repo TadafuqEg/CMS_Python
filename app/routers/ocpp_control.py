@@ -13,7 +13,7 @@ import uuid
 import json
 import logging
 from typing import Literal
-from app.models.database import get_db, ConnectionEvent, Connector, SessionLocal, SystemConfig
+from app.models.database import get_db, ConnectionEvent, Connector, SessionLocal, SystemConfig, RFIDCard
 from app.core.config import get_egypt_now, to_egypt_timezone
 
 logger = logging.getLogger(__name__)
@@ -376,6 +376,68 @@ async def remote_start_transaction(
             db.commit()
         else:
             raise HTTPException(status_code=400, detail="Charger is not connected")
+
+    # Validate RFID card before sending remote start command
+    id_tag = remote_start_req.id_tag
+    logger.info(f"Validating RFID card for remote start: charger_id={charger_id}, idTag={id_tag}")
+    
+    if not id_tag:
+        raise HTTPException(
+            status_code=400,
+            detail="id_tag is required for remote start transaction"
+        )
+    
+    # Check if RFID card exists in database
+    rfid_card = db.query(RFIDCard).filter(RFIDCard.id_tag == id_tag).first()
+    
+    if not rfid_card:
+        logger.warning(f"RFID card {id_tag} not found in database - REJECTED for remote start")
+        raise HTTPException(
+            status_code=400,
+            detail=f"RFID card '{id_tag}' not found in database. Card must be registered before starting a transaction."
+        )
+    
+    logger.info(f"RFID card found: id_tag={rfid_card.id_tag}, is_active={rfid_card.is_active}, is_blocked={rfid_card.is_blocked}, expires_at={rfid_card.expires_at}")
+    
+    # Check if card is blocked
+    if rfid_card.is_blocked:
+        logger.warning(f"RFID card {id_tag} is blocked - REJECTED for remote start")
+        raise HTTPException(
+            status_code=400,
+            detail=f"RFID card '{id_tag}' is blocked and cannot be used to start a transaction."
+        )
+    
+    # Check if card is active
+    if not rfid_card.is_active:
+        logger.warning(f"RFID card {id_tag} is inactive - REJECTED for remote start")
+        raise HTTPException(
+            status_code=400,
+            detail=f"RFID card '{id_tag}' is inactive and cannot be used to start a transaction."
+        )
+    
+    # Check if card is expired
+    current_time = get_egypt_now()
+    if rfid_card.expires_at:
+        # Make both datetimes timezone-aware for comparison
+        expires_at = rfid_card.expires_at
+        # If expires_at is naive, make it timezone-aware using current timezone
+        if expires_at.tzinfo is None:
+            # Assume it's in the same timezone as current_time
+            expires_at = to_egypt_timezone(expires_at)
+        
+        logger.info(f"Checking expiration: expires_at={expires_at}, current_time={current_time}, expired={expires_at < current_time}")
+        if expires_at < current_time:
+            logger.warning(f"RFID card {id_tag} is expired (expires_at={expires_at}, current_time={current_time}) - REJECTED for remote start")
+            raise HTTPException(
+                status_code=400,
+                detail=f"RFID card '{id_tag}' has expired and cannot be used to start a transaction."
+            )
+    
+    # Card is valid - update last_used_at
+    rfid_card.last_used_at = get_egypt_now()
+    db.commit()
+    
+    logger.info(f"RFID card {id_tag} validated successfully for remote start - ACCEPTED")
 
     # Generate unique message ID
     message_id = str(uuid.uuid4())
@@ -926,6 +988,68 @@ async def charging_remote_start(request: Request, body: RemoteStartBody, db: Ses
     # Verify the connection_id matches (extra safety check)
     if latest_connection_event.connection_id != ocpp_handler.connection_ids.get(body.charger_id):
         logger.warning(f"Connection ID mismatch for charger {body.charger_id}. DB: {latest_connection_event.connection_id}, Active: {ocpp_handler.connection_ids.get(body.charger_id)}")
+    
+    # Validate RFID card before sending remote start command
+    id_tag = body.id_tag
+    logger.info(f"Validating RFID card for remote start: charger_id={body.charger_id}, idTag={id_tag}")
+    
+    if not id_tag:
+        raise HTTPException(
+            status_code=400,
+            detail="id_tag is required for remote start transaction"
+        )
+    
+    # Check if RFID card exists in database
+    rfid_card = db.query(RFIDCard).filter(RFIDCard.id_tag == id_tag).first()
+    
+    if not rfid_card:
+        logger.warning(f"RFID card {id_tag} not found in database - REJECTED for remote start")
+        raise HTTPException(
+            status_code=400,
+            detail=f"RFID card '{id_tag}' not found in database. Card must be registered before starting a transaction."
+        )
+    
+    logger.info(f"RFID card found: id_tag={rfid_card.id_tag}, is_active={rfid_card.is_active}, is_blocked={rfid_card.is_blocked}, expires_at={rfid_card.expires_at}")
+    
+    # Check if card is blocked
+    if rfid_card.is_blocked:
+        logger.warning(f"RFID card {id_tag} is blocked - REJECTED for remote start")
+        raise HTTPException(
+            status_code=400,
+            detail=f"RFID card '{id_tag}' is blocked and cannot be used to start a transaction."
+        )
+    
+    # Check if card is active
+    if not rfid_card.is_active:
+        logger.warning(f"RFID card {id_tag} is inactive - REJECTED for remote start")
+        raise HTTPException(
+            status_code=400,
+            detail=f"RFID card '{id_tag}' is inactive and cannot be used to start a transaction."
+        )
+    
+    # Check if card is expired
+    current_time = get_egypt_now()
+    if rfid_card.expires_at:
+        # Make both datetimes timezone-aware for comparison
+        expires_at = rfid_card.expires_at
+        # If expires_at is naive, make it timezone-aware using current timezone
+        if expires_at.tzinfo is None:
+            # Assume it's in the same timezone as current_time
+            expires_at = to_egypt_timezone(expires_at)
+        
+        logger.info(f"Checking expiration: expires_at={expires_at}, current_time={current_time}, expired={expires_at < current_time}")
+        if expires_at < current_time:
+            logger.warning(f"RFID card {id_tag} is expired (expires_at={expires_at}, current_time={current_time}) - REJECTED for remote start")
+            raise HTTPException(
+                status_code=400,
+                detail=f"RFID card '{id_tag}' has expired and cannot be used to start a transaction."
+            )
+    
+    # Card is valid - update last_used_at
+    rfid_card.last_used_at = get_egypt_now()
+    db.commit()
+    
+    logger.info(f"RFID card {id_tag} validated successfully for remote start - ACCEPTED")
     
     # All checks passed - send remote start command
     message_id = str(uuid.uuid4())
