@@ -66,6 +66,29 @@ class WebSocketGateway {
         stats: connectionManager.getStats(),
         memory: process.memoryUsage(),
         uptime: process.uptime(),
+        redis: redisClient.getSubscriptionStatus(),
+      });
+    });
+
+    // Redis subscription status endpoint
+    this.httpApp.get('/redis/status', (req, res) => {
+      res.json({
+        redis: redisClient.getSubscriptionStatus(),
+        connections: connectionManager.getStats(),
+      });
+    });
+
+    // Test Redis publish endpoint (for debugging)
+    this.httpApp.post('/redis/test-publish', (req, res) => {
+      const { channel, message } = req.body;
+      if (!channel || !message) {
+        return res.status(400).json({ error: 'channel and message required' });
+      }
+      
+      redisClient.publish(channel, message).then(() => {
+        res.json({ success: true, channel, message });
+      }).catch((err) => {
+        res.status(500).json({ error: err.message });
       });
     });
 

@@ -146,11 +146,25 @@ class ConnectionManager {
 
     for (const channel of channels) {
       await redisClient.subscribe(channel, (data) => {
+        logger.info('🔔 CALLBACK TRIGGERED - Received Redis message in connection manager', {
+          channel: channel,
+          userId: userId,
+          messageType: data?.type || 'unknown',
+          sessionId: data?.session_id || null,
+          transactionId: data?.transaction_id || null,
+          event: data?.event || null,
+          chargerId: data?.data?.charger_id || null,
+          hasData: !!data,
+        });
         this.broadcastToUser(userId, data);
       });
     }
 
-    logger.debug(`Subscribed to channels for user ${userId}`);
+    logger.info('Subscribed to user channels', {
+      userId: userId,
+      channels: channels,
+      redisConnected: redisClient.isConnected(),
+    });
   }
 
   /**
@@ -282,28 +296,99 @@ class ConnectionManager {
   broadcastToUser(userId, data) {
     const userConnections = this.connections.get(userId);
     if (!userConnections) {
+      logger.warn('No active connections found for user', {
+        userId: userId,
+        messageType: data?.type || 'unknown',
+      });
       return;
     }
 
     const message = typeof data === 'string' ? data : JSON.stringify(data);
     let sentCount = 0;
+    let failedCount = 0;
+    const messageType = typeof data === 'object' ? data?.type : 'unknown';
 
-    userConnections.forEach((ws) => {
+    userConnections.forEach((ws, index) => {
+      const readyStateNames = {
+        0: 'CONNECTING',
+        1: 'OPEN',
+        2: 'CLOSING',
+        3: 'CLOSED'
+      };
+      
+      logger.info('🔍 Checking WebSocket connection before send', {
+        userId: userId,
+        connectionIndex: index,
+        readyState: ws.readyState,
+        readyStateName: readyStateNames[ws.readyState] || 'UNKNOWN',
+        isOpen: ws.readyState === WebSocket.OPEN,
+        messageType: messageType,
+        messageLength: message.length,
+        messagePreview: typeof message === 'string' ? message.substring(0, 100) : JSON.stringify(message).substring(0, 100),
+      });
+
       if (ws.readyState === WebSocket.OPEN) {
         try {
+          logger.info('📤 Attempting to send message to WebSocket', {
+            userId: userId,
+            connectionIndex: index,
+            messageType: messageType,
+            messageLength: message.length,
+            messageContent: typeof message === 'string' ? message : JSON.stringify(message),
+          });
+          
           ws.send(message);
           sentCount++;
+          
+          logger.info('✅ Successfully called ws.send() - message should be sent', {
+            userId: userId,
+            connectionIndex: index,
+            messageType: messageType,
+            sessionId: data?.session_id || null,
+            transactionId: data?.transaction_id || null,
+            event: data?.event || null,
+            messageLength: message.length,
+          });
         } catch (error) {
-          logger.error(`Error sending message to user ${userId}:`, error);
+          failedCount++;
+          logger.error('❌ Error sending message to WebSocket connection', {
+            userId: userId,
+            connectionIndex: index,
+            messageType: messageType,
+            error: error.message,
+            stack: error.stack,
+          });
           this.removeConnection(ws);
         }
       } else {
+        logger.warn('⚠️ WebSocket connection not open, skipping send', {
+          userId: userId,
+          connectionIndex: index,
+          readyState: ws.readyState,
+          readyStateName: readyStateNames[ws.readyState] || 'UNKNOWN',
+        });
         this.removeConnection(ws);
       }
     });
 
     if (sentCount > 0) {
-      logger.debug(`Broadcasted message to ${sentCount} connections for user ${userId}`);
+      logger.info('Broadcasted message to WebSocket connections', {
+        userId: userId,
+        messageType: messageType,
+        sentCount: sentCount,
+        failedCount: failedCount,
+        totalConnections: userConnections.size,
+        sessionId: data?.session_id || null,
+        transactionId: data?.transaction_id || null,
+        event: data?.event || null,
+      });
+    } else if (failedCount > 0) {
+      logger.warn('Failed to send message to any WebSocket connections', {
+        userId: userId,
+        messageType: messageType,
+        failedCount: failedCount,
+        totalConnections: userConnections.size,
+      });
     }
   }
 
@@ -313,10 +398,30 @@ class ConnectionManager {
   sendMessage(ws, data) {
     if (ws.readyState === WebSocket.OPEN) {
       try {
-        ws.send(JSON.stringify(data));
+        const message = JSON.stringify(data);
+        ws.send(message);
+        const userId = this.userConnections.get(ws);
+        logger.debug('Sent message to WebSocket', {
+          userId: userId || 'unknown',
+          messageType: data?.type || 'unknown',
+          readyState: ws.readyState,
+        });
       } catch (error) {
-        logger.error('Error sending message:', error);
+        const userId = this.userConnections.get(ws);
+        logger.error('Error sending message to WebSocket', {
+          userId: userId || 'unknown',
+          messageType: data?.type || 'unknown',
+          error: error.message,
+          stack: error.stack,
+        });
       }
+    } else {
+      const userId = this.userConnections.get(ws);
+      logger.warn('Cannot send message: WebSocket not open', {
+        userId: userId || 'unknown',
+        messageType: data?.type || 'unknown',
+        readyState: ws.readyState,
+      });
     }
   }
 
