@@ -24,6 +24,7 @@ class RFIDCardCreate(BaseModel):
     organization_id: Optional[str] = Field(None, description="Organization ID")
     site_id: Optional[str] = Field(None, description="Site ID")
     card_metadata: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Additional metadata")
+    wattage_limit: Optional[float] = Field(None, ge=0, description="Total wattage limit assigned to this RFID card (in Wh). When set, remaining_wattage will be initialized to this value.")
 
 class RFIDCardUpdate(BaseModel):
     card_number: Optional[str] = None
@@ -36,6 +37,7 @@ class RFIDCardUpdate(BaseModel):
     organization_id: Optional[str] = None
     site_id: Optional[str] = None
     card_metadata: Optional[Dict[str, Any]] = None
+    wattage_limit: Optional[float] = Field(None, ge=0, description="Total wattage limit assigned to this RFID card (in Wh). If updated, remaining_wattage will be reset to this value if not already set.")
 
 class RFIDCardResponse(BaseModel):
     id: int
@@ -50,6 +52,8 @@ class RFIDCardResponse(BaseModel):
     organization_id: Optional[str]
     site_id: Optional[str]
     card_metadata: Dict[str, Any]
+    wattage_limit: Optional[float]
+    remaining_wattage: Optional[float]
     created_at: datetime
     updated_at: datetime
     last_used_at: Optional[datetime]
@@ -113,7 +117,9 @@ async def create_rfid_card(
         user_id=card.user_id,
         organization_id=card.organization_id,
         site_id=card.site_id,
-        card_metadata=card.card_metadata or {}
+        card_metadata=card.card_metadata or {},
+        wattage_limit=card.wattage_limit,
+        remaining_wattage=card.wattage_limit if card.wattage_limit is not None else None
     )
     
     db.add(db_card)
@@ -186,6 +192,11 @@ async def update_rfid_card(
     
     # Update fields
     update_data = card_update.dict(exclude_unset=True)
+    
+    # If wattage_limit is being updated and remaining_wattage is not set, reset it to the new limit
+    if "wattage_limit" in update_data and update_data["wattage_limit"] is not None:
+        if card.remaining_wattage is None:
+            update_data["remaining_wattage"] = update_data["wattage_limit"]
     
     for field, value in update_data.items():
         setattr(card, field, value)
@@ -345,7 +356,9 @@ async def bulk_create_rfid_cards(
             user_id=card_data.user_id,
             organization_id=card_data.organization_id,
             site_id=card_data.site_id,
-            card_metadata=card_data.card_metadata or {}
+            card_metadata=card_data.card_metadata or {},
+            wattage_limit=card_data.wattage_limit,
+            remaining_wattage=card_data.wattage_limit if card_data.wattage_limit is not None else None
         )
         
         db.add(db_card)

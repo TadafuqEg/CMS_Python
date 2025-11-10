@@ -544,14 +544,112 @@ class OCPPHandler:
             if transaction_id is not None:
                 transaction_id = int(transaction_id)
             
+            # Get the active session to find the id_tag
+            session = None
+            if transaction_id:
+                session = db.query(Session).filter(
+                    Session.transaction_id == transaction_id,
+                    Session.charger_id == charger_id,
+                    Session.status == "Active"
+                ).first()
+            
+            # Track energy consumed for wattage management
+            energy_consumed_wh = 0.0
+            previous_energy_wh = 0.0
+            
             for meter_value in payload.get("meterValue", []):
                 for sample in meter_value.get("sampledValue", []):
                     if sample.get("measurand") == "Energy.Active.Import.Register":
-                        connector = db.query(Connector).filter(Connector.charger_id == charger_id, Connector.connector_id == connector_id).first()
+                        # Handle string values from charger (convert to float)
+                        value = sample.get("value", 0)
+                        if isinstance(value, str):
+                            energy_value_wh = float(value)
+                        else:
+                            energy_value_wh = float(value) if value is not None else 0.0
+                        
+                        # Update connector energy delivered (convert to kWh)
+                        connector = db.query(Connector).filter(
+                            Connector.charger_id == charger_id,
+                            Connector.connector_id == connector_id
+                        ).first()
                         if connector:
-                            connector.energy_delivered = float(sample.get("value", 0)) / 1000
+                            connector.energy_delivered = energy_value_wh / 1000  # Convert Wh to kWh
                             connector.last_updated = get_egypt_now()
+                        
+                        # Store meter_start if not set (fallback if StartTransaction didn't provide it)
+                        if session and session.meter_start is None:
+                            session.meter_start = energy_value_wh
                             db.commit()
+                            logger.info(f"Set meter_start from first MeterValues: {energy_value_wh} Wh for transaction {transaction_id}")
+                        
+                        previous_energy_wh = energy_value_wh
+            
+            db.commit()
+            
+            # Update RFID card remaining_wattage if session has an id_tag
+            if session and session.id_tag and previous_energy_wh > 0:
+                rfid_card = db.query(RFIDCard).filter(RFIDCard.id_tag == session.id_tag).first()
+                if rfid_card and rfid_card.wattage_limit is not None:
+                    # Ensure meter_start is set (should be from StartTransaction, but fallback to first meter value)
+                    if session.meter_start is None:
+                        session.meter_start = previous_energy_wh
+                        db.commit()
+                        logger.warning(f"meter_start was None for transaction {transaction_id}, using first meter value: {previous_energy_wh} Wh")
+                    
+                    # Calculate total energy consumed since transaction start (in Wh)
+                    # Energy consumed = current meter reading - meter reading at start
+                    total_consumed_wh = previous_energy_wh - session.meter_start
+                    
+                    # Ensure we don't have negative consumption (shouldn't happen, but safety check)
+                    if total_consumed_wh < 0:
+                        logger.warning(f"Negative energy consumption detected for transaction {transaction_id}: {total_consumed_wh} Wh. Setting to 0.")
+                        total_consumed_wh = 0
+                    
+                    # Get the initial remaining_wattage at transaction start from session metadata
+                    # This was stored when the transaction started
+                    if not session.session_metadata:
+                        session.session_metadata = {}
+                    
+                    # Get initial remaining_wattage from session metadata (stored at transaction start)
+                    initial_remaining_wattage = session.session_metadata.get("initial_remaining_wattage")
+                    if initial_remaining_wattage is None:
+                        # Fallback: use current remaining_wattage or wattage_limit
+                        initial_remaining_wattage = rfid_card.remaining_wattage if rfid_card.remaining_wattage is not None else rfid_card.wattage_limit
+                        session.session_metadata["initial_remaining_wattage"] = initial_remaining_wattage
+                        db.commit()
+                    
+                    # Calculate new remaining wattage
+                    new_remaining_wattage = initial_remaining_wattage - total_consumed_wh
+                    if new_remaining_wattage < 0:
+                        new_remaining_wattage = 0
+                    
+                    # Update RFID card remaining_wattage
+                    rfid_card.remaining_wattage = new_remaining_wattage
+                    db.commit()
+                    
+                    logger.info(f"Updated remaining_wattage for RFID card {session.id_tag}: {rfid_card.remaining_wattage:.2f} Wh remaining (consumed {total_consumed_wh:.2f} Wh from initial {initial_remaining_wattage:.2f} Wh)")
+                    
+                    # If remaining_wattage reached zero or below, automatically stop the transaction
+                    if rfid_card.remaining_wattage <= 0:
+                        logger.warning(f"RFID card {session.id_tag} wattage limit reached (remaining: {rfid_card.remaining_wattage:.2f} Wh). Automatically stopping transaction {transaction_id}")
+                        
+                        # Send RemoteStopTransaction to charger
+                        stop_message_id = str(uuid.uuid4())
+                        stop_message = [
+                            2,  # CALL
+                            stop_message_id,
+                            "RemoteStopTransaction",
+                            {
+                                "transactionId": transaction_id
+                            }
+                        ]
+                        
+                        # Send the stop command
+                        success = await self.send_message_to_charger(charger_id, stop_message)
+                        if success:
+                            logger.info(f"Successfully sent RemoteStopTransaction for transaction {transaction_id} due to wattage limit")
+                        else:
+                            logger.error(f"Failed to send RemoteStopTransaction for transaction {transaction_id}")
             
             # Create proper MeterValuesPayload using OCPP library (empty dict)
             meter_response = call_result.MeterValuesPayload()
@@ -566,6 +664,13 @@ class OCPPHandler:
         try:
             connector_id = payload.get("connectorId", 0)
             id_tag = payload.get("idTag")
+            meter_start = payload.get("meterStart", 0)
+            
+            # Convert meter_start to float if it's a string
+            if isinstance(meter_start, str):
+                meter_start = float(meter_start)
+            else:
+                meter_start = float(meter_start) if meter_start is not None else 0.0
             
             # Initialize transaction counter for charger if not exists
             if charger_id not in self.transaction_counters:
@@ -575,16 +680,39 @@ class OCPPHandler:
             self.transaction_counters[charger_id] += 1
             transaction_id = self.transaction_counters[charger_id]
             
+            # Initialize remaining_wattage from wattage_limit if RFID card has a limit set
+            initial_remaining_wattage = None
+            if id_tag:
+                rfid_card = db.query(RFIDCard).filter(RFIDCard.id_tag == id_tag).first()
+                if rfid_card and rfid_card.wattage_limit is not None:
+                    # If remaining_wattage is None or less than limit, reset it to limit
+                    if rfid_card.remaining_wattage is None or rfid_card.remaining_wattage < rfid_card.wattage_limit:
+                        rfid_card.remaining_wattage = rfid_card.wattage_limit
+                        db.commit()
+                        logger.info(f"Initialized remaining_wattage to {rfid_card.wattage_limit} Wh for RFID card {id_tag}")
+                    
+                    # Store the initial remaining_wattage for this transaction
+                    initial_remaining_wattage = rfid_card.remaining_wattage
+            
+            # Create session with metadata to track initial remaining_wattage
+            session_metadata = {}
+            if initial_remaining_wattage is not None:
+                session_metadata["initial_remaining_wattage"] = initial_remaining_wattage
+            
             session = Session(
                 charger_id=charger_id,
                 connector_id=connector_id,
                 transaction_id=transaction_id,
                 id_tag=id_tag,
                 start_time=get_egypt_now(),
-                status="Active"
+                status="Active",
+                meter_start=meter_start,  # Store meterStart from StartTransaction
+                session_metadata=session_metadata
             )
             db.add(session)
             db.commit()
+            
+            logger.info(f"StartTransaction: charger_id={charger_id}, transaction_id={transaction_id}, id_tag={id_tag}, meter_start={meter_start} Wh")
             
             # Create proper StartTransactionPayload using OCPP library
             start_response = call_result.StartTransactionPayload(

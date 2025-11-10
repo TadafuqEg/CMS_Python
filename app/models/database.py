@@ -218,6 +218,10 @@ class RFIDCard(Base):
     # Additional metadata
     card_metadata = Column(JSON, default=dict)
     
+    # Wattage management
+    wattage_limit = Column(Float, nullable=True)  # Total wattage limit assigned to this RFID card (in Wh)
+    remaining_wattage = Column(Float, nullable=True)  # Remaining wattage available (in Wh)
+    
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
