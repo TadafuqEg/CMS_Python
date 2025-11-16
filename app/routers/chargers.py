@@ -30,6 +30,7 @@ class ChargerResponse(BaseModel):
     organization_id: Optional[str]
     created_at: datetime
     updated_at: datetime
+    connectors: Optional[List[Dict[str, Any]]] = []
 
 class ChargerDetailResponse(ChargerResponse):
     configuration: Dict[str, Any]
@@ -82,7 +83,53 @@ async def get_chargers(
     # Apply pagination and ordering
     chargers = query.order_by(desc(Charger.last_heartbeat)).offset(skip).limit(limit).all()
     
-    return chargers
+    # Get charger IDs for efficient connector querying
+    charger_ids = [charger.id for charger in chargers]
+    
+    # Fetch all connectors for these chargers in one query (optimize N+1 problem)
+    connectors_dict = {}
+    if charger_ids:
+        connectors = db.query(Connector).filter(Connector.charger_id.in_(charger_ids)).all()
+        # Group connectors by charger_id
+        for conn in connectors:
+            if conn.charger_id not in connectors_dict:
+                connectors_dict[conn.charger_id] = []
+            connectors_dict[conn.charger_id].append({
+                "id": conn.id,
+                "connector_id": conn.connector_id,
+                "status": conn.status,
+                "error_code": conn.error_code,
+                "energy_delivered": conn.energy_delivered,
+                "power_delivered": conn.power_delivered
+            })
+    
+    # Build response with connectors for each charger
+    result = []
+    for charger in chargers:
+        # Get connectors for this charger (empty list if none)
+        connector_data = connectors_dict.get(charger.id, [])
+        
+        # Create ChargerResponse with connectors
+        charger_response = ChargerResponse(
+            id=charger.id,
+            vendor=charger.vendor,
+            model=charger.model,
+            serial_number=charger.serial_number,
+            firmware_version=charger.firmware_version,
+            status=charger.status,
+            last_heartbeat=charger.last_heartbeat,
+            last_message=charger.last_message,
+            is_connected=charger.is_connected,
+            connection_time=charger.connection_time,
+            site_id=charger.site_id,
+            organization_id=charger.organization_id,
+            created_at=charger.created_at,
+            updated_at=charger.updated_at,
+            connectors=connector_data
+        )
+        result.append(charger_response)
+    
+    return result
 
 @router.get("/chargers/{charger_id}", response_model=ChargerDetailResponse)
 async def get_charger_detail(charger_id: str, db: Session = Depends(get_db)):
