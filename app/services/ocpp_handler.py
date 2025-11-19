@@ -2,6 +2,7 @@ import asyncio
 import json
 import uuid
 import logging
+import traceback
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Optional, List, Set, Any, Callable
 from dataclasses import dataclass, asdict
@@ -361,9 +362,16 @@ class OCPPHandler:
             else:
                 logger.warning(f"Unknown message type {message_type} from {charger_id}")
         except Exception as e:
-            logger.error(f"Error processing message from {charger_id}: {e}")
+            error_traceback = traceback.format_exc()
+            logger.error(f"Error processing message from {charger_id}: {e}\n{error_traceback}")
             self.stats["messages_failed"] += 1
-            error_response = [4, message[1] if len(message) > 1 else str(uuid.uuid4()), "FormatViolation", str(e), {}]
+            # Get message_id safely
+            message_id = message[1] if len(message) > 1 else str(uuid.uuid4())
+            # Provide a cleaner error message for FormatViolation
+            error_message = str(e)
+            if "invalid literal for int()" in error_message:
+                error_message = "Invalid transaction ID format in database. Please check for non-integer transaction IDs."
+            error_response = [4, message_id, "FormatViolation", error_message, {}]
             await self.send_message_to_charger(charger_id, error_response, processing_time=time() - start_time)
 
     async def handle_incoming_call(self, charger_id: str, message_id: str, action: str, payload: Dict[str, Any]) -> Optional[List[Any]]:
@@ -695,10 +703,37 @@ class OCPPHandler:
             
             # Get the last transaction ID for this charger from database
             # This ensures transaction IDs are unique per charger and persist across CMS restarts
-            last_transaction = db.query(func.max(Session.transaction_id)).filter(
-                Session.charger_id == charger_id,
-                Session.transaction_id.isnot(None)
-            ).scalar()
+            # Query for the maximum integer transaction_id (filter out any non-integer values)
+            try:
+                # Get all transaction_ids for this charger and find the max integer value
+                all_transactions = db.query(Session.transaction_id).filter(
+                    Session.charger_id == charger_id,
+                    Session.transaction_id.isnot(None)
+                ).all()
+                
+                # Filter and convert to integers, handling any non-integer values
+                integer_transactions = []
+                for (tx_id,) in all_transactions:
+                    try:
+                        if isinstance(tx_id, (int, float)):
+                            integer_transactions.append(int(tx_id))
+                        elif isinstance(tx_id, str):
+                            # Try to convert string to int, skip if it's not a valid integer
+                            try:
+                                integer_transactions.append(int(tx_id))
+                            except (ValueError, TypeError):
+                                logger.warning(f"Skipping non-integer transaction_id for charger {charger_id}: {tx_id}")
+                                continue
+                    except (ValueError, TypeError):
+                        logger.warning(f"Skipping invalid transaction_id for charger {charger_id}: {tx_id}")
+                        continue
+                
+                # Get the maximum integer transaction_id
+                last_transaction = max(integer_transactions) if integer_transactions else None
+                
+            except Exception as e:
+                logger.error(f"Error querying last transaction_id for charger {charger_id}: {e}")
+                last_transaction = None
             
             # If no previous transactions exist, start at 1, otherwise increment
             if last_transaction is None:
