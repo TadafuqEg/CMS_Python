@@ -193,10 +193,9 @@ async def update_rfid_card(
     # Update fields
     update_data = card_update.dict(exclude_unset=True)
     
-    # If wattage_limit is being updated and remaining_wattage is not set, reset it to the new limit
+    # If wattage_limit is being updated, always reset remaining_wattage to the new limit
     if "wattage_limit" in update_data and update_data["wattage_limit"] is not None:
-        if card.remaining_wattage is None:
-            update_data["remaining_wattage"] = update_data["wattage_limit"]
+        update_data["remaining_wattage"] = update_data["wattage_limit"]
     
     for field, value in update_data.items():
         setattr(card, field, value)

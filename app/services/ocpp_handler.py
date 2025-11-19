@@ -763,9 +763,19 @@ class OCPPHandler:
             
             session = db.query(Session).filter(Session.transaction_id == transaction_id, Session.charger_id == charger_id).first()
             if session:
-                session.stop_time = get_egypt_now()
+                # Set stop_time to current time in Egypt timezone
+                stop_time = get_egypt_now()
+                session.stop_time = stop_time
                 session.meter_stop = payload.get("meterStop")
                 session.energy_delivered = (session.meter_stop - session.meter_start) / 1000 if session.meter_start and session.meter_stop else 0
+
+                # Calculate duration in seconds: stop_time - start_time
+                if session.start_time is not None:
+                    duration_seconds = int((stop_time - session.start_time).total_seconds())
+                    if duration_seconds < 0:
+                        duration_seconds = 0
+                    session.duration = duration_seconds
+
                 session.status = "Completed"
                 db.commit()
             
