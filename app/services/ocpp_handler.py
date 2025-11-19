@@ -672,13 +672,20 @@ class OCPPHandler:
             else:
                 meter_start = float(meter_start) if meter_start is not None else 0.0
             
-            # Initialize transaction counter for charger if not exists
-            if charger_id not in self.transaction_counters:
-                self.transaction_counters[charger_id] = 0
+            # Get the last transaction ID for this charger from database
+            # This ensures transaction IDs are unique per charger and persist across CMS restarts
+            last_transaction = db.query(func.max(Session.transaction_id)).filter(
+                Session.charger_id == charger_id,
+                Session.transaction_id.isnot(None)
+            ).scalar()
             
-            # Increment and get transaction ID (integer)
-            self.transaction_counters[charger_id] += 1
-            transaction_id = self.transaction_counters[charger_id]
+            # If no previous transactions exist, start at 1, otherwise increment
+            if last_transaction is None:
+                transaction_id = 1
+            else:
+                transaction_id = int(last_transaction) + 1
+            
+            logger.info(f"Generated transaction_id={transaction_id} for charger_id={charger_id} (last was {last_transaction})")
             
             # Initialize remaining_wattage from wattage_limit if RFID card has a limit set
             initial_remaining_wattage = None
