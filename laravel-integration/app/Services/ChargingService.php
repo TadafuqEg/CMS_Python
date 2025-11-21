@@ -69,7 +69,7 @@ class ChargingService
             $session = ChargingSession::create([
                 'user_id' => $user->id,
                 'charger_id' => $chargerId,
-                'connector_id' => $connectorId,
+                'gun_id' => $connectorId,
                 'status' => 'active',
                 'started_at' => now(),
                 'python_cms_message_id' => $responseData['message_id'] ?? null,

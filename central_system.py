@@ -100,6 +100,24 @@ class ClientManager:
             if websocket in self.master_connections:
                 self.master_connections.remove(websocket)
 
+    async def broadcast_to_master(self, message):
+        """Broadcast a message to the master connection"""
+        if not self.master_connections:
+            # logging.debug("No master connection to broadcast to")
+            return False
+        
+        success_count = 0
+        message_str = json.dumps(message) if isinstance(message, dict) else message
+        
+        for websocket in self.master_connections:
+            try:
+                await websocket.send(message_str)
+                success_count += 1
+            except Exception as e:
+                logging.error(f"Failed to send to master: {e}")
+                
+        return success_count > 0
+
 # Global client manager instance
 client_manager = ClientManager()
 
@@ -161,6 +179,19 @@ class CentralSystem(cp):
         try:
             logging.info(f"Received BootNotification from {charge_point_model}, {charge_point_vendor}, firmware: {firmware_version}")
             
+            # Forward to master
+            await client_manager.broadcast_to_master({
+                "message_type": "ocpp_forward",
+                "charger_id": self.charge_point_id,
+                "direction": "incoming",
+                "ocpp_message": [2, "boot", "BootNotification", {
+                    "chargePointModel": charge_point_model,
+                    "chargePointVendor": charge_point_vendor,
+                    "firmwareVersion": firmware_version,
+                    **kwargs
+                }]
+            })
+
             # Save BootNotification data to database
             await self.save_boot_notification_to_db(charge_point_model, charge_point_vendor, firmware_version, kwargs)
             
@@ -400,6 +431,20 @@ class CentralSystem(cp):
     async def on_meter_values(self, connector_id, transaction_id, meter_value, **kwargs):
         try:
             logging.info(f"Received MeterValues: connector_id {connector_id}, transaction_id {transaction_id}")
+            
+            # Forward to master
+            await client_manager.broadcast_to_master({
+                "message_type": "ocpp_forward",
+                "charger_id": self.charge_point_id,
+                "direction": "incoming",
+                "ocpp_message": [2, "meter", "MeterValues", {
+                    "connectorId": connector_id,
+                    "transactionId": transaction_id,
+                    "meterValue": meter_value,
+                    **kwargs
+                }]
+            })
+            
             return call_result.MeterValuesPayload()
         except Exception as e:
             logging.error(f"Error in on_meter_values: {e}")
@@ -476,6 +521,32 @@ class CentralSystem(cp):
         try:
             self.transaction_counter += 1  # Increment transaction counter
             logging.info(f"Received StartTransaction: connector_id {connector_id}, id_tag {id_tag}, transaction_id {self.transaction_counter}")
+            
+            # Forward incoming request to master
+            await client_manager.broadcast_to_master({
+                "message_type": "ocpp_forward",
+                "charger_id": self.charge_point_id,
+                "direction": "incoming",
+                "ocpp_message": [2, "start", "StartTransaction", {
+                    "connectorId": connector_id,
+                    "idTag": id_tag,
+                    "meterStart": meter_start,
+                    "timestamp": timestamp,
+                    **kwargs
+                }]
+            })
+            
+            # Forward outgoing response to master (so Laravel gets the transaction_id)
+            await client_manager.broadcast_to_master({
+                "message_type": "ocpp_forward",
+                "charger_id": self.charge_point_id,
+                "direction": "outgoing",
+                "ocpp_message": [3, "start", {
+                    "transactionId": self.transaction_counter,
+                    "idTagInfo": {'status': AuthorizationStatus.accepted}
+                }]
+            })
+            
             return call_result.StartTransactionPayload(
                 transaction_id=self.transaction_counter,
                 id_tag_info={'status': AuthorizationStatus.accepted}
@@ -488,6 +559,20 @@ class CentralSystem(cp):
     async def on_status_notification(self, connector_id, error_code, status, **kwargs):
         try:
             logging.info(f"Received StatusNotification: connector_id {connector_id}, status {status}, error_code {error_code}")
+            
+            # Forward to master
+            await client_manager.broadcast_to_master({
+                "message_type": "ocpp_forward",
+                "charger_id": self.charge_point_id,
+                "direction": "incoming",
+                "ocpp_message": [2, "status", "StatusNotification", {
+                    "connectorId": connector_id,
+                    "errorCode": error_code,
+                    "status": status,
+                    **kwargs
+                }]
+            })
+            
             return call_result.StatusNotificationPayload()
         except Exception as e:
             logging.error(f"Error in on_status_notification: {e}")
@@ -497,6 +582,31 @@ class CentralSystem(cp):
     async def on_stop_transaction(self, transaction_id, id_tag, meter_stop, timestamp, **kwargs):
         try:
             logging.info(f"Received StopTransaction: transaction_id {transaction_id}, id_tag {id_tag}")
+            
+            # Forward incoming request to master
+            await client_manager.broadcast_to_master({
+                "message_type": "ocpp_forward",
+                "charger_id": self.charge_point_id,
+                "direction": "incoming",
+                "ocpp_message": [2, "stop", "StopTransaction", {
+                    "transactionId": transaction_id,
+                    "idTag": id_tag,
+                    "meterStop": meter_stop,
+                    "timestamp": timestamp,
+                    **kwargs
+                }]
+            })
+            
+            # Forward outgoing response to master
+            await client_manager.broadcast_to_master({
+                "message_type": "ocpp_forward",
+                "charger_id": self.charge_point_id,
+                "direction": "outgoing",
+                "ocpp_message": [3, "stop", {
+                    "idTagInfo": {'status': AuthorizationStatus.accepted}
+                }]
+            })
+            
             return call_result.StopTransactionPayload(
                 id_tag_info={'status': AuthorizationStatus.accepted}
             )
