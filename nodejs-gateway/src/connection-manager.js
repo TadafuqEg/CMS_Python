@@ -8,27 +8,51 @@ class ConnectionManager {
   constructor() {
     this.connections = new Map(); // Map<userId, Set<WebSocket>>
     this.userConnections = new Map(); // Map<WebSocket, userId>
+    this.guestConnections = new Set(); // Set<WebSocket> for guest connections
+    this.publicChannelSubscribed = false; // Track if public channel is subscribed
     this.connectionStats = {
       total: 0,
       active: 0,
       byUser: new Map(),
+      guests: 0,
     };
   }
 
   /**
    * Handle new WebSocket connection
+   * Supports both authenticated users and guest connections (for public channels only)
    */
   async handleConnection(ws, req) {
     try {
       // Extract and validate token
       const token = authService.extractToken(req);
+      
+      // If no token, allow as guest connection (public channels only)
       if (!token) {
-        logger.warn('Connection rejected: No token provided');
-        ws.close(1008, 'Authentication required');
+        logger.info('Guest connection (no token) - will only receive public channel updates');
+        this.addGuestConnection(ws);
+        
+        // Subscribe to public channels
+        if (redisClient.isConnected()) {
+          await this.subscribeToPublicChannels();
+        }
+        
+        // Set up message handlers (limited for guests)
+        this.setupGuestMessageHandlers(ws);
+        
+        // Send welcome message
+        this.sendMessage(ws, {
+          type: 'connected',
+          timestamp: new Date().toISOString(),
+          isGuest: true,
+          message: 'Connected as guest. You will receive public charger status updates.',
+        });
+        
+        logger.info(`Guest connected. Total connections: ${this.connectionStats.active} (${this.connectionStats.guests} guests)`);
         return;
       }
 
-      // Validate token
+      // Validate token for authenticated users
       const user = await authService.validateToken(token);
       if (!user) {
         logger.warn('Connection rejected: Invalid token');
@@ -49,6 +73,8 @@ class ConnectionManager {
       // Subscribe to user-specific Redis channels (if Redis is available)
       if (redisClient.isConnected()) {
         await this.subscribeToUserChannels(userId);
+        // Also subscribe to public channels for authenticated users
+        await this.subscribeToPublicChannels();
       } else {
         logger.debug(`Redis not available, skipping channel subscription for user ${userId}`);
       }
@@ -61,6 +87,7 @@ class ConnectionManager {
         type: 'connected',
         timestamp: new Date().toISOString(),
         userId: userId,
+        isGuest: false,
       });
 
       logger.info(`User ${userId} connected. Total connections: ${this.connectionStats.active}`);
@@ -93,9 +120,27 @@ class ConnectionManager {
   }
 
   /**
+   * Add guest connection
+   */
+  addGuestConnection(ws) {
+    this.guestConnections.add(ws);
+    this.connectionStats.active++;
+    this.connectionStats.guests++;
+  }
+
+  /**
    * Remove connection
    */
   removeConnection(ws) {
+    // Check if it's a guest connection
+    if (this.guestConnections.has(ws)) {
+      this.guestConnections.delete(ws);
+      this.connectionStats.active--;
+      this.connectionStats.guests--;
+      logger.info(`Guest disconnected. Active connections: ${this.connectionStats.active} (${this.connectionStats.guests} guests)`);
+      return;
+    }
+
     const userId = this.userConnections.get(ws);
     if (!userId) {
       return;
@@ -131,6 +176,42 @@ class ConnectionManager {
   }
 
   /**
+   * Subscribe to public Redis channels (charger status updates)
+   * This is called once and shared by all connections
+   */
+  async subscribeToPublicChannels() {
+    if (!redisClient.isConnected()) {
+      return;
+    }
+
+    // Only subscribe once to the public channel
+    if (this.publicChannelSubscribed) {
+      return;
+    }
+
+    const publicChannel = 'charger:updates';
+
+    await redisClient.subscribe(publicChannel, (data) => {
+      logger.info('🔔 Received public charger update from Redis', {
+        channel: publicChannel,
+        messageType: data?.type || 'unknown',
+        chargerId: data?.charger_id || null,
+        stationId: data?.station_id || null,
+        status: data?.status || null,
+      });
+      
+      // Broadcast to all connections (both authenticated and guest)
+      this.broadcastToAll(data);
+    });
+
+    this.publicChannelSubscribed = true;
+    logger.info('Subscribed to public channels', {
+      channel: publicChannel,
+      redisConnected: redisClient.isConnected(),
+    });
+  }
+
+  /**
    * Subscribe to user-specific Redis channels
    */
   async subscribeToUserChannels(userId) {
@@ -141,7 +222,7 @@ class ConnectionManager {
     const channels = [
       `user:${userId}:notifications`,
       `user:${userId}:session_updates`,
-      `user:${userId}:charger_updates`,
+      // Note: charger_updates removed from user channels - now using public channel
     ];
 
     for (const channel of channels) {
@@ -178,12 +259,66 @@ class ConnectionManager {
     const channels = [
       `user:${userId}:notifications`,
       `user:${userId}:session_updates`,
-      `user:${userId}:charger_updates`,
+      // Note: charger_updates removed - using public channel now
     ];
 
     for (const channel of channels) {
       await redisClient.unsubscribe(channel);
     }
+  }
+
+  /**
+   * Set up message handlers for guest connections (limited functionality)
+   */
+  setupGuestMessageHandlers(ws) {
+    // Handle incoming messages (guests can only receive, not send)
+    ws.on('message', async (data) => {
+      try {
+        const message = JSON.parse(data.toString());
+        logger.debug('Guest attempted to send message (not allowed)', { message });
+        this.sendError(ws, 'Guest connections are read-only. Please authenticate to send messages.');
+      } catch (error) {
+        logger.error('Error handling guest message:', error);
+        this.sendError(ws, 'Invalid message format');
+      }
+    });
+
+    // Handle connection close
+    ws.on('close', () => {
+      this.removeConnection(ws);
+    });
+
+    // Handle errors
+    ws.on('error', (error) => {
+      logger.error('Guest WebSocket error:', error);
+      this.removeConnection(ws);
+    });
+
+    // Handle pong (response to ping) - CRITICAL: Without this, guest connections will be terminated
+    ws.on('pong', () => {
+      ws.isAlive = true;
+      logger.debug('Guest connection pong received, connection is alive');
+    });
+
+    // Set up heartbeat
+    ws.isAlive = true;
+    const heartbeatInterval = setInterval(() => {
+      if (ws.isAlive === false) {
+        logger.warn('Guest connection did not respond to ping, terminating', {
+          readyState: ws.readyState,
+        });
+        clearInterval(heartbeatInterval);
+        ws.terminate();
+        return;
+      }
+      ws.isAlive = false;
+      ws.ping();
+      logger.debug('Sent ping to guest connection');
+    }, config.server.heartbeatInterval);
+
+    ws.on('close', () => {
+      clearInterval(heartbeatInterval);
+    });
   }
 
   /**
@@ -287,6 +422,65 @@ class ConnectionManager {
         error: 'Failed to process request',
         message: error.message,
       };
+    }
+  }
+
+  /**
+   * Broadcast message to all connections (both authenticated and guest)
+   * Used for public channels like charger status updates
+   */
+  broadcastToAll(data) {
+    const message = typeof data === 'string' ? data : JSON.stringify(data);
+    let sentCount = 0;
+    let failedCount = 0;
+    const messageType = typeof data === 'object' ? data?.type : 'unknown';
+
+    // Broadcast to all authenticated users
+    this.connections.forEach((userConnections, userId) => {
+      userConnections.forEach((ws) => {
+        if (ws.readyState === WebSocket.OPEN) {
+          try {
+            ws.send(message);
+            sentCount++;
+          } catch (error) {
+            failedCount++;
+            logger.error('Error broadcasting to authenticated user', {
+              userId,
+              error: error.message,
+            });
+            this.removeConnection(ws);
+          }
+        }
+      });
+    });
+
+    // Broadcast to all guest connections
+    this.guestConnections.forEach((ws) => {
+      if (ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(message);
+          sentCount++;
+        } catch (error) {
+          failedCount++;
+          logger.error('Error broadcasting to guest connection', {
+            error: error.message,
+          });
+          this.removeConnection(ws);
+        }
+      } else {
+        this.removeConnection(ws);
+      }
+    });
+
+    if (sentCount > 0) {
+      logger.info('Broadcasted public message to all connections', {
+        messageType,
+        sentCount,
+        failedCount,
+        totalConnections: this.connectionStats.active,
+        authenticatedUsers: this.connections.size,
+        guests: this.guestConnections.size,
+      });
     }
   }
 
@@ -444,6 +638,7 @@ class ConnectionManager {
       total: this.connectionStats.total,
       active: this.connectionStats.active,
       uniqueUsers: this.connections.size,
+      guests: this.connectionStats.guests,
       byUser: Object.fromEntries(this.connectionStats.byUser),
       instanceId: config.server.instanceId,
     };
