@@ -8,3 +8,4 @@
 *.db
 *.sqlite
 *.sqlite3
+nodejs-gateway/logs/*.log
