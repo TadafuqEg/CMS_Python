@@ -1,11 +1,11 @@
 aiohttp==3.10.10
 bcrypt==5.0.0
-fastapi==0.95.2
+fastapi>=0.100.0
+pydantic>=2.0
+pydantic-settings
 jwt==1.4.0
 mysql-connector-python
 ocpp==0.16.0
-pydantic==1.10.12
-pydantic_settings==1.10.12
 pymysql
 python-dotenv==1.2.1
 pytz==2025.2
