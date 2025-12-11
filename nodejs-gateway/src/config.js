@@ -11,7 +11,7 @@ module.exports = {
   },
   
   laravel: {
-    apiUrl: process.env.LARAVEL_API_URL || 'http://localhost:8000',
+    apiUrl: process.env.LARAVEL_API_URL || 'localhost:8000',
     timeout: parseInt(process.env.LARAVEL_API_TIMEOUT || 5000, 10),
   },
   
