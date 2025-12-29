@@ -217,9 +217,12 @@ class RedisClient {
 
     this.messageHandler = (receivedChannel, message) => {
       try {
-        logger.info('🎉🎉🎉 RAW REDIS MESSAGE RECEIVED - Message handler triggered! 🎉🎉🎉', {
+        // Log raw message received
+        logger.info('📥 REDIS MESSAGE RECEIVED', {
           channel: receivedChannel,
           messageLength: message ? message.length : 0,
+          messagePreview: message ? (message.length > 500 ? message.substring(0, 500) + '...' : message) : null,
+          rawMessage: message, // Log full message
           subscribedChannels: Array.from(this.subscribedChannels),
           hasCallbacks: this.channelCallbacks.has(receivedChannel),
           callbackCount: this.channelCallbacks.get(receivedChannel)?.length || 0,
@@ -231,6 +234,7 @@ class RedisClient {
         if (!callbacks || callbacks.length === 0) {
           logger.warn('Received message for channel with no callbacks', {
             channel: receivedChannel,
+            message: message, // Log message even if no callbacks
             subscribedChannels: Array.from(this.subscribedChannels),
             allChannelsWithCallbacks: Array.from(this.channelCallbacks.keys()),
           });
@@ -241,18 +245,25 @@ class RedisClient {
         let data;
         try {
           data = JSON.parse(message);
-          logger.info('Parsed Redis message successfully', {
+          logger.info('✅ REDIS MESSAGE PARSED', {
             channel: receivedChannel,
             messageType: data?.type || 'unknown',
+            messageData: data, // Log full parsed message data
             callbackCount: callbacks.length,
             sessionId: data?.session_id || null,
             transactionId: data?.transaction_id || null,
+            event: data?.event || null,
+            chargerId: data?.data?.charger_id || data?.charger_id || null,
+            userId: data?.user_id || data?.userId || null,
+            timestamp: new Date().toISOString(),
           });
         } catch (error) {
-          logger.error('Error parsing Redis message', {
+          logger.error('❌ ERROR PARSING REDIS MESSAGE', {
             channel: receivedChannel,
             error: error.message,
-            messagePreview: message.substring(0, 200),
+            rawMessage: message, // Log full message even on parse error
+            messagePreview: message ? message.substring(0, 500) : null,
+            stack: error.stack,
           });
           return;
         }
@@ -260,17 +271,24 @@ class RedisClient {
         // Call all callbacks for this channel
         callbacks.forEach((callback, index) => {
           try {
-            logger.debug('Calling Redis message callback', {
+            logger.info('📤 CALLING REDIS MESSAGE CALLBACK', {
               channel: receivedChannel,
               callbackIndex: index,
               totalCallbacks: callbacks.length,
+              messageType: data?.type || 'unknown',
+              messageData: data, // Log message data being passed to callback
             });
             callback(data);
+            logger.debug('✅ Redis message callback executed successfully', {
+              channel: receivedChannel,
+              callbackIndex: index,
+            });
           } catch (error) {
-            logger.error('Error in Redis message callback', {
+            logger.error('❌ ERROR IN REDIS MESSAGE CALLBACK', {
               channel: receivedChannel,
               callbackIndex: index,
               error: error.message,
+              messageData: data, // Log message data that caused error
               stack: error.stack,
             });
           }
@@ -290,9 +308,10 @@ class RedisClient {
     
     // Set up message handler with explicit binding
     const handler = (channel, message) => {
-      logger.info('📨 RAW MESSAGE EVENT FIRED - ioredis message event triggered', {
+      logger.info('📨 REDIS MESSAGE EVENT FIRED (ioredis)', {
         channel: channel,
         messageLength: message ? message.length : 0,
+        rawMessage: message, // Log full raw message
         handlerType: 'message',
         timestamp: new Date().toISOString(),
         subscriberStatus: this.subscriber.status,
@@ -301,7 +320,10 @@ class RedisClient {
       if (this.messageHandler) {
         this.messageHandler(channel, message);
       } else {
-        logger.error('CRITICAL: messageHandler is null when message received!');
+        logger.error('CRITICAL: messageHandler is null when message received!', {
+          channel: channel,
+          message: message, // Log message even if handler is null
+        });
       }
     };
     
@@ -325,12 +347,23 @@ class RedisClient {
     
     // Also listen for pmessage (pattern messages) just in case
     this.subscriber.on('pmessage', (pattern, channel, message) => {
-      logger.debug('Received pattern message (should not happen with regular subscribe)', {
+      logger.info('📨 REDIS PATTERN MESSAGE RECEIVED', {
         pattern: pattern,
         channel: channel,
+        messageLength: message ? message.length : 0,
+        rawMessage: message, // Log full message
+        timestamp: new Date().toISOString(),
       });
       // Call the regular message handler
-      this.messageHandler(channel, message);
+      if (this.messageHandler) {
+        this.messageHandler(channel, message);
+      } else {
+        logger.error('CRITICAL: messageHandler is null when pattern message received!', {
+          pattern: pattern,
+          channel: channel,
+          message: message,
+        });
+      }
     });
     
     logger.info('Redis message handler set up successfully', {

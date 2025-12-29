@@ -192,12 +192,14 @@ class ConnectionManager {
     const publicChannel = 'charger:updates';
 
     await redisClient.subscribe(publicChannel, (data) => {
-      logger.info('🔔 Received public charger update from Redis', {
+      logger.info('🔔 REDIS MESSAGE - Public Charger Update', {
         channel: publicChannel,
         messageType: data?.type || 'unknown',
+        messageData: data, // Log full message data
         chargerId: data?.charger_id || null,
         stationId: data?.station_id || null,
         status: data?.status || null,
+        timestamp: new Date().toISOString(),
       });
       
       // Broadcast to all connections (both authenticated and guest)
@@ -227,15 +229,17 @@ class ConnectionManager {
 
     for (const channel of channels) {
       await redisClient.subscribe(channel, (data) => {
-        logger.info('🔔 CALLBACK TRIGGERED - Received Redis message in connection manager', {
+        logger.info('🔔 REDIS MESSAGE - User Channel', {
           channel: channel,
           userId: userId,
           messageType: data?.type || 'unknown',
+          messageData: data, // Log full message data
           sessionId: data?.session_id || null,
           transactionId: data?.transaction_id || null,
           event: data?.event || null,
-          chargerId: data?.data?.charger_id || null,
+          chargerId: data?.data?.charger_id || data?.charger_id || null,
           hasData: !!data,
+          timestamp: new Date().toISOString(),
         });
         this.broadcastToUser(userId, data);
       });
