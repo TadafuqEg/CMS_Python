@@ -12,7 +12,7 @@ import ssl
 import websockets
 from websockets.server import WebSocketServerProtocol
 
-from app.routers import health, chargers, ocpp_control, logs, internal, rfid_cards, users
+from app.routers import health, chargers, ocpp_control, logs, internal, rfid_cards, users, connectors
 from app.services.ocpp_handler import OCPPHandler
 from app.services.session_manager import SessionManager
 from app.services.mq_bridge import MQBridge
@@ -84,6 +84,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
 
 app.include_router(health.router, prefix="/api", tags=["Health"])
 app.include_router(chargers.router, prefix="/api", tags=["Chargers"])
+app.include_router(connectors.router, prefix="/api", tags=["Connectors"])
 app.include_router(ocpp_control.router, prefix="/api", tags=["OCPP Control"])
 app.include_router(logs.router, prefix="/api", tags=["Logs"])
 app.include_router(internal.router, prefix="/api", tags=["Internal"])

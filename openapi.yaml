@@ -341,6 +341,248 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  /api/connectors:
+    get:
+      tags:
+        - Connectors
+      summary: Get Connectors
+      description: Get list of connectors with optional filtering
+      parameters:
+        - name: skip
+          in: query
+          description: Number of records to skip
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: limit
+          in: query
+          description: Maximum number of records to return
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+        - name: charger_id
+          in: query
+          description: Filter by charger ID
+          schema:
+            type: string
+        - name: connector_id
+          in: query
+          description: Filter by OCPP connector ID
+          schema:
+            type: integer
+            minimum: 0
+        - name: status
+          in: query
+          description: Filter by status
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of connectors
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ConnectorResponse'
+    
+    post:
+      tags:
+        - Connectors
+      summary: Create Connector
+      description: Create a new connector for a charger
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConnectorCreateRequest'
+      responses:
+        '201':
+          description: Connector created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectorResponse'
+        '404':
+          description: Charger not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Connector already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/connectors/{connector_id}:
+    get:
+      tags:
+        - Connectors
+      summary: Get Connector
+      description: Get detailed information about a specific connector
+      parameters:
+        - name: connector_id
+          in: path
+          required: true
+          description: Database ID of the connector
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Connector details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectorDetailResponse'
+        '404':
+          description: Connector not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    
+    put:
+      tags:
+        - Connectors
+      summary: Update Connector
+      description: Update connector information
+      parameters:
+        - name: connector_id
+          in: path
+          required: true
+          description: Database ID of the connector
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConnectorUpdateRequest'
+      responses:
+        '200':
+          description: Connector updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectorResponse'
+        '404':
+          description: Connector not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    
+    delete:
+      tags:
+        - Connectors
+      summary: Delete Connector
+      description: Delete a connector (fails if connector has active sessions)
+      parameters:
+        - name: connector_id
+          in: path
+          required: true
+          description: Database ID of the connector
+          schema:
+            type: integer
+      responses:
+        '204':
+          description: Connector deleted successfully
+        '400':
+          description: Cannot delete connector with active sessions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Connector not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/connectors/{connector_id}/statistics:
+    get:
+      tags:
+        - Connectors
+      summary: Get Connector Statistics
+      description: Get statistics for a specific connector
+      parameters:
+        - name: connector_id
+          in: path
+          required: true
+          description: Database ID of the connector
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Connector statistics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectorStatistics'
+        '404':
+          description: Connector not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/chargers/{charger_id}/connectors:
+    get:
+      tags:
+        - Connectors
+      summary: Get Charger Connectors
+      description: Get all connectors for a specific charger
+      parameters:
+        - name: charger_id
+          in: path
+          required: true
+          description: ID of the charger
+          schema:
+            type: string
+        - name: skip
+          in: query
+          description: Number of records to skip
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: limit
+          in: query
+          description: Maximum number of records to return
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+        - name: status
+          in: query
+          description: Filter by status
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of connectors for the charger
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ConnectorResponse'
+        '404':
+          description: Charger not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /api/ocpp/remote/start:
     post:
       tags:
@@ -1036,6 +1278,172 @@ components:
         duration:
           type: integer
 
+    ConnectorResponse:
+      type: object
+      properties:
+        id:
+          type: integer
+          description: Database ID of the connector
+          example: 1
+        charger_id:
+          type: string
+          description: ID of the charger this connector belongs to
+          example: "CP_001"
+        connector_id:
+          type: integer
+          description: OCPP connector ID (0 for whole charging point, >=1 for specific connector)
+          example: 1
+        status:
+          type: string
+          description: Current status of the connector
+          enum: [Available, Charging, Faulted, Unavailable, Preparing, SuspendedEV, SuspendedEVSE, Finishing, Reserved]
+          example: "Available"
+        error_code:
+          type: string
+          nullable: true
+          description: Error code if applicable
+          example: "NoError"
+        energy_delivered:
+          type: number
+          format: float
+          description: Total energy delivered in kWh
+          example: 125.5
+        power_delivered:
+          type: number
+          format: float
+          description: Current power delivered in kW
+          example: 7.2
+        created_at:
+          type: string
+          format: date-time
+          description: Creation timestamp
+        updated_at:
+          type: string
+          format: date-time
+          description: Last update timestamp
+
+    ConnectorDetailResponse:
+      allOf:
+        - $ref: '#/components/schemas/ConnectorResponse'
+        - type: object
+          properties:
+            charger:
+              type: object
+              nullable: true
+              properties:
+                id:
+                  type: string
+                vendor:
+                  type: string
+                model:
+                  type: string
+                serial_number:
+                  type: string
+                status:
+                  type: string
+                is_connected:
+                  type: boolean
+
+    ConnectorCreateRequest:
+      type: object
+      required:
+        - charger_id
+        - connector_id
+      properties:
+        charger_id:
+          type: string
+          description: ID of the charger this connector belongs to
+          example: "CP_001"
+        connector_id:
+          type: integer
+          minimum: 0
+          description: OCPP connector ID (0 for whole charging point, >=1 for specific connector)
+          example: 1
+        status:
+          type: string
+          description: Initial status of the connector
+          enum: [Available, Charging, Faulted, Unavailable, Preparing, SuspendedEV, SuspendedEVSE, Finishing, Reserved]
+          default: "Available"
+          example: "Available"
+        error_code:
+          type: string
+          nullable: true
+          description: Error code if applicable
+          example: "NoError"
+
+    ConnectorUpdateRequest:
+      type: object
+      properties:
+        status:
+          type: string
+          description: Status of the connector
+          enum: [Available, Charging, Faulted, Unavailable, Preparing, SuspendedEV, SuspendedEVSE, Finishing, Reserved]
+        error_code:
+          type: string
+          nullable: true
+          description: Error code if applicable
+        energy_delivered:
+          type: number
+          format: float
+          minimum: 0
+          description: Total energy delivered in kWh
+        power_delivered:
+          type: number
+          format: float
+          minimum: 0
+          description: Current power delivered in kW
+
+    ConnectorStatistics:
+      type: object
+      properties:
+        connector_id:
+          type: integer
+          description: Database ID of the connector
+        charger_id:
+          type: string
+          description: ID of the charger
+        ocpp_connector_id:
+          type: integer
+          description: OCPP connector ID
+        status:
+          type: string
+          description: Current status
+        error_code:
+          type: string
+          nullable: true
+          description: Current error code
+        total_sessions:
+          type: integer
+          description: Total number of sessions
+        active_sessions:
+          type: integer
+          description: Number of active sessions
+        completed_sessions:
+          type: integer
+          description: Number of completed sessions
+        total_energy_delivered_kwh:
+          type: number
+          format: float
+          description: Total energy delivered in kWh
+        total_cost:
+          type: number
+          format: float
+          description: Total cost
+        current_energy_delivered:
+          type: number
+          format: float
+          description: Current energy delivered
+        current_power_delivered:
+          type: number
+          format: float
+          description: Current power delivered
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
     RemoteStartRequest:
       type: object
       required:
@@ -1325,6 +1733,8 @@ tags:
     description: System health and monitoring endpoints
   - name: Chargers
     description: Charger management and monitoring
+  - name: Connectors
+    description: Connector management and monitoring
   - name: OCPP Control
     description: OCPP remote control commands
   - name: Logs
